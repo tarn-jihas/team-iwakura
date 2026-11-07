@@ -1,11 +1,19 @@
 # Reconcile · local hackathon demo
 
-A stateful, **FULL MOCK / SYNTHETIC DATA** Adapty add-on demo: independent payment
-evidence → Adapty activation → actual Lumen access. Three local HTTP processes
-demonstrate incident diagnosis, a confirmed account cohort, approved repair and
-gate verification. The Python server SDK is executable; the mobile integration
-is a contract and simulator, not a native library. No live credentials or new
-dependencies are needed. Commercial value remains a [pilot hypothesis](docs/PILOT_BRIEF.md).
+An Adapty add-on demo for incident diagnosis, affected-account detection,
+approved repair and verified Lumen access. Three local HTTP processes and an
+executable Python server SDK support two explicit evidence modes:
+
+- **Full mock:** independent synthetic payment evidence → Adapty activation →
+  actual local Lumen gate. No credentials are needed.
+- **Live Adapty, seeded data:** real Adapty entitlement reads and CLI catalog
+  integration → actual Lumen SDK events → approved local resync → real gate
+  verification. The official seed purchases remain synthetic, not payment proof.
+
+The mobile integration remains a contract and simulator. No new dependencies
+are required. Commercial value remains a [pilot hypothesis](docs/PILOT_BRIEF.md).
+
+For the connected hackathon app, use the [live Lumen demo guide](docs/LIVE_ADAPTY_DEMO.md).
 
 ## Run
 
@@ -42,8 +50,9 @@ See the [demo walkthrough and final verification](docs/ACTIVATION_VERIFICATION.m
 [recovery API and responsibilities](docs/RECOVERY_API.md),
 [mobile boundary](docs/MOBILE_CONTRACT.md),
 [product rationale](docs/PAYMENT_ACTIVATION_MVP.md) and
-[pilot criteria](docs/PILOT_BRIEF.md). Native SDKs and live provider behavior are
-outside this iteration.
+[pilot criteria](docs/PILOT_BRIEF.md). Native SDKs and actual store payment
+validation remain outside this iteration; the optional live mode reads Adapty
+entitlements and repairs only local Lumen state.
 
 ## Retained cancellation recovery demo
 
@@ -127,7 +136,12 @@ that separate browser lab is read-only with respect to the Python repair state.
 - `reconcile-mock-first-kit/reference/`: static synthetic provider-shaped samples.
 - `docs/handoffs/`: implementation and verification context for each request.
 
-Current iteration: **141 automated tests passed** (33 JavaScript, 79 Python,
+Live integration checkpoint: **162 automated tests passed** (35 JavaScript,
+97 Python, 7 HTTP integration and 23 black-box acceptance), plus the actual
+Adapty public-HTTP and browser recovery replays. See the
+[connected demo evidence](docs/LIVE_ADAPTY_DEMO.md).
+
+Mock activation baseline: **141 automated tests passed** (33 JavaScript, 79 Python,
 6 HTTP integration and 23 black-box acceptance), including the 50k HTTP scan.
 See [final results and limits](docs/ACTIVATION_VERIFICATION.md).
 
@@ -139,9 +153,10 @@ CLI replay and browser walkthrough passed. See [analytics verification](docs/VER
 
 Analytics supports the fixed nine-account, one-app USD/EUR scenario. Google, Apple, Stripe,
 Amplitude, AppsFlyer, PostHog and competitor webhook examples are reference samples,
-not active connectors. Access recovery changes only our mock Lumen projection and
-cache after fresh entitlement checks; it never grants external licences. No real
-provider integration, real AI, FX conversion or production accounting is implied.
+not active payment connectors. Access recovery changes only our local Lumen
+projection and cache after fresh entitlement checks; it never grants external
+licences. The live Adapty source is read-only after the authorized official seed.
+No real store checkout, real AI, FX conversion or production accounting is implied.
 The separate937-order Revenue Bridge archive was not supplied. Original archive
 README files describe their original standalone
 versions; this README describes the integrated project.

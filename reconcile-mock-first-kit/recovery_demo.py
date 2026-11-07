@@ -37,8 +37,9 @@ def private_key(path):
 
 class Demo:
     """Own only child processes and their runtime; useful to the external UAT harness."""
-    def __init__(self, runtime, port=0):
+    def __init__(self, runtime, port=0, *, live_config=None):
         self.runtime = Path(runtime).resolve()
+        self.live_config = Path(live_config).resolve() if live_config else None
         self.port = port or free_port()
         self.processes = {}
         self.logs = {}
@@ -51,6 +52,8 @@ class Demo:
                    '--role', role, '--port', str(self.port if role == 'engine' else 0),
                    '--db', str(self.runtime / (role + '.sqlite3')),
                    '--key-file', str(key), '--demo']
+        if self.live_config:
+            command += ['--live-config', str(self.live_config)]
         if role in ('lumen', 'engine'):
             command += ['--provider-url', self.urls['provider']]
         if role == 'lumen':
@@ -63,7 +66,7 @@ class Demo:
         self.processes[role] = process
         with selectors.DefaultSelector() as selector:
             selector.register(process.stdout, selectors.EVENT_READ)
-            if not selector.select(timeout=15):
+            if not selector.select(timeout=60 if self.live_config else 15):
                 raise RuntimeError(f'{role} did not announce readiness; inspect {role}.log')
             line = process.stdout.readline()
         if not line:

@@ -254,6 +254,63 @@ def init_lumen(path, scenario='stripe', variant=0, reset=False, run_id=None):
         db.close()
 
 
+def init_live_lumen(path, live_manifest, profiles):
+    if (live_manifest.get('customer_count') != 100 or len(profiles) != 100
+            or any(not item.get('observed_at') or not item.get('identity_match')
+                   for item in profiles)):
+        raise ValueError('Live Adapty bootstrap requires 100 observed matching profiles')
+    db = connect(path)
+    _schema(db, [
+        'CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY,value TEXT NOT NULL)',
+        'CREATE TABLE IF NOT EXISTS accounts(user_id TEXT PRIMARY KEY,provider_customer_id TEXT,identity_status TEXT NOT NULL,provenance TEXT NOT NULL)',
+        'CREATE TABLE IF NOT EXISTS mappings(user_id TEXT PRIMARY KEY,provider_customer_id TEXT,status TEXT NOT NULL,revision INTEGER NOT NULL)',
+        'CREATE TABLE IF NOT EXISTS policies(user_id TEXT PRIMARY KEY,feature TEXT NOT NULL,enabled INTEGER NOT NULL,revision INTEGER NOT NULL)',
+        'CREATE TABLE IF NOT EXISTS access(user_id TEXT PRIMARY KEY,active INTEGER NOT NULL,expires_at TEXT,entitlement_hash TEXT,projection_revision INTEGER NOT NULL,cache_revision INTEGER NOT NULL,cache_active INTEGER NOT NULL,cache_expires_at TEXT,cache_entitlement_hash TEXT,cache_invalidated INTEGER NOT NULL,stale_once INTEGER NOT NULL,updated_at TEXT NOT NULL)',
+        'CREATE TABLE IF NOT EXISTS actions(operation_key TEXT PRIMARY KEY,request_hash TEXT NOT NULL,result TEXT NOT NULL,created_at TEXT NOT NULL)',
+        'CREATE TABLE IF NOT EXISTS mobile_events(event_id TEXT PRIMARY KEY,event_json TEXT NOT NULL,received_at TEXT NOT NULL)',
+        'CREATE TABLE IF NOT EXISTS live_fault_tags(user_id TEXT PRIMARY KEY,handler_version TEXT NOT NULL,config_version TEXT NOT NULL,occurred_at TEXT NOT NULL)',
+    ])
+    try:
+        if _meta(db, 'initialized', False):
+            current = manifest(db)
+            if current.get('scenario') != 'live_adapty' or current.get('run_id') != live_manifest.get('run_id'):
+                raise ValueError('Live Lumen runtime scope changed')
+            return
+        db.execute('BEGIN IMMEDIATE')
+        try:
+            now = iso(datetime.now(timezone.utc))
+            for name, value in live_manifest.items():
+                _set_meta(db, name, value)
+            _set_meta(db, 'scenario_now', now)
+            _set_meta(db, 'logical_elapsed_seconds', 0)
+            for profile in profiles:
+                user_id = profile['user_id']
+                entitlement = profile.get('entitlement')
+                active = bool(profile.get('status') == 'active' and entitlement)
+                customer_id = profile.get('provider_customer_id', user_id)
+                # The configured app/customer registry is the local identity map; source validation is separate.
+                identity = 'mapped' if customer_id == user_id else 'unknown'
+                db.execute('INSERT INTO accounts VALUES(?,?,?,?)',
+                           (user_id, customer_id, identity, _meta(db, 'provenance')))
+                db.execute('INSERT INTO mappings VALUES(?,?,?,?)',
+                           (user_id, customer_id, identity, 1))
+                db.execute('INSERT INTO policies VALUES(?,?,?,?)', (user_id, FEATURE, 1, 1))
+                expires_at = entitlement.get('expires_at') if active else None
+                entitlement_hash = entitlement.get('entitlement_hash') if active else None
+                db.execute('INSERT INTO access VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',
+                    (user_id, int(active), expires_at, entitlement_hash, 1, 1,
+                     int(active), expires_at, entitlement_hash, 0, 0,
+                     profile.get('observed_at') or now))
+            _set_meta(db, 'initialized', True)
+            db.execute('COMMIT')
+        except Exception:
+            if db.in_transaction:
+                db.execute('ROLLBACK')
+            raise
+    finally:
+        db.close()
+
+
 def manifest(db):
     return {row['key']: json.loads(row['value']) for row in db.execute('SELECT key,value FROM meta')
             if row['key'] not in ('logical_elapsed_seconds', 'last_advance_at', 'initialized')}
@@ -263,6 +320,10 @@ def logical_now(db):
     base = _time(_meta(db, 'scenario_now'), 'scenario_now')
     elapsed = _meta(db, 'logical_elapsed_seconds', 0)
     return base + timedelta(seconds=elapsed)
+
+
+def _app_now(db):
+    return datetime.now(timezone.utc) if _meta(db, 'scenario') == 'live_adapty' else logical_now(db)
 
 
 def advance_clock(path, seconds):
@@ -515,7 +576,7 @@ def _gate(db, user_id):
     if access['cache_invalidated'] or access['cache_revision'] != access['projection_revision']:
         return {'allowed': False, 'reason': 'cache_stale',
                 'projection_revision': access['projection_revision'], 'cache_revision': access['cache_revision']}
-    now = logical_now(db)
+    now = _app_now(db)
     if not access['cache_expires_at'] or _time(access['cache_expires_at'], 'expires_at') <= now:
         return {'allowed': False, 'reason': 'subscription_expired',
                 'projection_revision': access['projection_revision'], 'cache_revision': access['cache_revision']}
@@ -538,13 +599,19 @@ def lumen_accounts(path, cursor=None, limit=500):
             policy = dict(db.execute('SELECT * FROM policies WHERE user_id=?', (user_id,)).fetchone())
             access = dict(db.execute('SELECT * FROM access WHERE user_id=?', (user_id,)).fetchone())
             gate = _gate(db, user_id)
+            fault = None
+            if _meta(db, 'scenario') == 'live_adapty':
+                tag = db.execute('SELECT handler_version,config_version,occurred_at FROM live_fault_tags WHERE user_id=?',
+                                 (user_id,)).fetchone()
+                fault = None if tag is None else dict(tag)
             items.append({'user_id': user_id, 'provider_customer_id': account['provider_customer_id'],
                           'identity_status': mapping['status'], 'identity_revision': mapping['revision'],
                           'policy_enabled': bool(policy['enabled']), 'policy_revision': policy['revision'],
                           'gate': gate, 'projection_revision': access['projection_revision'],
                           'cache_revision': access['cache_revision'], 'access_active': bool(access['active']),
                           'access_expires_at': access['expires_at'],
-                          'entitlement_hash': access['entitlement_hash']})
+                          'entitlement_hash': access['entitlement_hash'],
+                          **({'delivery_signature': fault} if _meta(db, 'scenario') == 'live_adapty' else {})})
         total = db.execute('SELECT COUNT(*) FROM accounts').fetchone()[0]
         return {'items': items, 'next_cursor': str(offset+len(items)) if offset+len(items) < total else None,
                 'total': total}
@@ -576,17 +643,26 @@ def lumen_resync(path, body):
     if isinstance(body['expected_revision'], bool) or not isinstance(body['expected_revision'], int) or body['expected_revision'] < 1:
         raise ValueError('Invalid expected_revision')
     entitlement = body['entitlement']
-    if not isinstance(entitlement, dict) or set(entitlement) != {'product_id', 'expires_at', 'entitlement_hash', 'transaction_id'}:
+    required_entitlement = {'product_id', 'expires_at', 'entitlement_hash', 'transaction_id'}
+    if not isinstance(entitlement, dict) or set(entitlement) not in (required_entitlement,
+            required_entitlement | {'source_fingerprint'}):
         raise ValueError('Invalid entitlement')
     if any(not isinstance(entitlement[key], str) or not entitlement[key] for key in entitlement):
         raise ValueError('Invalid entitlement')
+    if 'source_fingerprint' in entitlement and (len(entitlement['source_fingerprint']) != 64
+            or any(char not in '0123456789abcdef' for char in entitlement['source_fingerprint'])):
+        raise ValueError('Invalid source fingerprint')
     if digest({'user_id': body['user_id'], 'product_id': entitlement['product_id'],
                'expires_at': entitlement['expires_at']}) != entitlement['entitlement_hash']:
         raise ValueError('Invalid entitlement hash')
     db = connect(path)
     db.execute('BEGIN IMMEDIATE')
     try:
-        now = iso(logical_now(db))
+        if _meta(db, 'scenario') == 'live_adapty' and 'source_fingerprint' not in entitlement:
+            raise ValueError('Live resync requires a source fingerprint')
+        if _meta(db, 'scenario') != 'live_adapty' and 'source_fingerprint' in entitlement:
+            raise ValueError('Source fingerprint is supported only for live resync')
+        now = iso(_app_now(db))
         previous = db.execute('SELECT request_hash,result FROM actions WHERE operation_key=?', (body['operation_key'],)).fetchone()
         if previous:
             if previous['request_hash'] != digest(body):
@@ -604,10 +680,14 @@ def lumen_resync(path, body):
         if row['projection_revision'] != body['expected_revision']:
             raise ValueError('Lumen access revision changed')
         expiry = _time(entitlement['expires_at'], 'expires_at')
-        if expiry <= logical_now(db):
+        if expiry <= _app_now(db):
             raise ValueError('Entitlement is expired')
         next_revision = row['projection_revision'] + 1
         skip_cache = bool(row['stale_once'])
+        before = {'active': bool(row['active']), 'premium': bool(row['active']),
+                  'expires_at': row['expires_at'], 'projection_revision': row['projection_revision'],
+                  'cache_revision': row['cache_revision'], 'source_hash': row['entitlement_hash'],
+                  'invalidated': bool(row['cache_invalidated'])}
         if skip_cache:
             db.execute('UPDATE access SET active=1,expires_at=?,entitlement_hash=?,projection_revision=?,stale_once=0,cache_invalidated=1,updated_at=? WHERE user_id=?',
                        (entitlement['expires_at'], entitlement['entitlement_hash'], next_revision, now, body['user_id']))
@@ -619,6 +699,17 @@ def lumen_resync(path, body):
                   'projection_revision': next_revision,
                   'cache_revision': row['cache_revision'] if skip_cache else next_revision,
                   'cache_skipped': skip_cache, 'operation_key': body['operation_key']}
+        if _meta(db, 'scenario') == 'live_adapty':
+            source_hash = entitlement['source_fingerprint']
+            result.update(before=before, after={'active': True, 'premium': True,
+                'expires_at': entitlement['expires_at'], 'projection_revision': next_revision,
+                'cache_revision': row['cache_revision'] if skip_cache else next_revision,
+                'source_hash': source_hash, 'invalidated': bool(skip_cache)},
+                source_hash=source_hash, policy_version='premium-policy-v1',
+                adapter_version='adapty-profile-read-v1',
+                projection_version=_meta(db, 'live_handler_version', 'lumen-handler-v2'),
+                config_version=_meta(db, 'live_config_version', 'premium-export-v2'))
+            db.execute('DELETE FROM live_fault_tags WHERE user_id=?', (body['user_id'],))
         db.execute('INSERT INTO actions VALUES(?,?,?,?)',
                    (body['operation_key'], digest(body), canonical(result), now))
         db.execute('COMMIT')
@@ -627,6 +718,82 @@ def lumen_resync(path, body):
         if db.in_transaction:
             db.execute('ROLLBACK')
         raise
+    finally:
+        db.close()
+
+
+def lumen_live_inject_fault(path, user_ids, handler_version, config_version, occurred_at):
+    if (not isinstance(user_ids, list) or len(user_ids) != 24
+            or len(set(user_ids)) != 24
+            or any(not isinstance(user_id, str) or not user_id for user_id in user_ids)
+            or not isinstance(handler_version, str) or not handler_version
+            or not isinstance(config_version, str) or not config_version):
+        raise ValueError('Live fault request is invalid')
+    at = iso(_time(occurred_at, 'fault occurrence time'))
+    db = connect(path)
+    db.execute('BEGIN IMMEDIATE')
+    try:
+        if _meta(db, 'scenario') != 'live_adapty':
+            raise ValueError('Live fault is supported only in the live scenario')
+        if _meta(db, 'live_fault_injected', False):
+            raise ValueError('Live fault was already injected')
+        changed = []
+        for user_id in user_ids:
+            access = db.execute('SELECT * FROM access WHERE user_id=?', (user_id,)).fetchone()
+            mapping = db.execute('SELECT status FROM mappings WHERE user_id=?', (user_id,)).fetchone()
+            policy = db.execute('SELECT enabled FROM policies WHERE user_id=?', (user_id,)).fetchone()
+            if (access is None or mapping is None or mapping['status'] != 'mapped'
+                    or policy is None or not policy['enabled'] or not _gate(db, user_id)['allowed']
+                    or not access['entitlement_hash']):
+                raise ValueError('Live fault target is not currently healthy')
+            before = {'active': bool(access['active']), 'premium': bool(access['active']),
+                      'expires_at': access['expires_at'],
+                      'projection_revision': access['projection_revision'],
+                      'cache_revision': access['cache_revision'],
+                      'source_hash': access['entitlement_hash'], 'invalidated': False}
+            next_revision = access['projection_revision'] + 1
+            db.execute('UPDATE access SET active=0,projection_revision=?,cache_revision=?,cache_active=0,cache_invalidated=1,updated_at=? WHERE user_id=?',
+                       (next_revision, next_revision, at, user_id))
+            db.execute('INSERT INTO live_fault_tags VALUES(?,?,?,?)',
+                       (user_id, handler_version, config_version, at))
+            changed.append({'user_id': user_id, 'before': before,
+                'after': {'active': False, 'premium': False, 'expires_at': access['expires_at'],
+                          'projection_revision': next_revision, 'cache_revision': next_revision,
+                          'source_hash': access['entitlement_hash'], 'invalidated': True},
+                'source_hash': access['entitlement_hash'],
+                'projection_revision': next_revision,
+                'cache_revision': next_revision,
+                'policy_version': 'premium-policy-v1',
+                'adapter_version': 'adapty-profile-read-v1'})
+        _set_meta(db, 'live_fault_injected', True)
+        _set_meta(db, 'live_fault_account_count', len(changed))
+        _set_meta(db, 'live_fault_handler_version', handler_version)
+        _set_meta(db, 'live_fault_config_version', config_version)
+        _set_meta(db, 'live_fault_occurred_at', at)
+        _set_meta(db, 'live_handler_version', handler_version)
+        _set_meta(db, 'live_config_version', config_version)
+        db.execute('COMMIT')
+        return {'injected': True, 'account_count': len(changed),
+                'handler_version': handler_version, 'config_version': config_version,
+                'occurred_at': at, 'accounts': changed}
+    except Exception:
+        if db.in_transaction:
+            db.execute('ROLLBACK')
+        raise
+    finally:
+        db.close()
+
+
+def lumen_live_fault_status(path):
+    db = connect(path)
+    try:
+        if _meta(db, 'scenario') != 'live_adapty':
+            raise ValueError('Live status is supported only in the live scenario')
+        return {'injected': bool(_meta(db, 'live_fault_injected', False)),
+                'account_count': _meta(db, 'live_fault_account_count', 0),
+                'handler_version': _meta(db, 'live_fault_handler_version'),
+                'config_version': _meta(db, 'live_fault_config_version'),
+                'occurred_at': _meta(db, 'live_fault_occurred_at')}
     finally:
         db.close()
 

@@ -23,6 +23,7 @@ from uuid import uuid4
 
 import recovery_domain as domain
 import recovery_contracts
+import recovery_live
 import recovery_scenarios
 
 HERE = Path(__file__).resolve().parent
@@ -204,7 +205,7 @@ def _one(query, key, default=None):
 
 class RecoveryService:
     def __init__(self, role, port, db_path, key_file, *, provider_url=None,
-                 lumen_url=None, collector_url=None, demo=False):
+                 lumen_url=None, collector_url=None, demo=False, live_config=None):
         self.role = role
         self.port = port
         self.db_path = Path(db_path).resolve()
@@ -214,6 +215,8 @@ class RecoveryService:
         self.lumen_url = self._base(lumen_url, 'lumen_url', required=role == 'engine')
         self.collector_url = self._collector(collector_url, required=role == 'lumen')
         self.demo = bool(demo)
+        self.live_config = recovery_live.load_config(live_config) if live_config else None
+        self.live_reader = None
         self.adapty_db = self.db_path.with_name(self.db_path.stem + '-adapty.sqlite3')
         self.outbox_db = self.db_path.with_name(self.db_path.stem + '-outbox.sqlite3')
         self._jobs_lock = threading.Lock()
@@ -223,10 +226,24 @@ class RecoveryService:
         self.sdk = None
         self._sdk_thread_started = False
         if role == 'provider':
-            domain.init_provider(self.db_path, self.adapty_db)
+            if self.live_config:
+                self.live_reader = recovery_live.AdaptyReader(self.live_config)
+                recovery_live.init_provider(self.db_path, self.adapty_db,
+                                            self.live_config, self.live_reader)
+            else:
+                domain.init_provider(self.db_path, self.adapty_db)
         elif role == 'lumen':
-            domain.init_lumen(self.db_path)
+            if self.live_config:
+                live_manifest = internal_request(self.key, self.provider_url,
+                                                  'GET', '/internal/manifest')
+                bootstrap = internal_request(self.key, self.provider_url,
+                    'GET', '/internal/adapty/profiles?limit=100', timeout=60)
+                domain.init_live_lumen(self.db_path, live_manifest, bootstrap.get('items', []))
+            else:
+                domain.init_lumen(self.db_path)
             self._init_sdk()
+            if self.live_config:
+                self._emit_source_observations(bootstrap.get('items', []))
         else:
             self._init_engine()
             self._init_legacy()
@@ -265,6 +282,47 @@ class RecoveryService:
             thread = threading.Thread(target=self._flush_sdk, name='recovery-sdk-flush', daemon=True)
             thread.start()
             self._sdk_thread_started = True
+
+    def _emit_source_observations(self, profiles):
+        reason_codes = {'active': 'allowed', 'subscription_expired': 'subscription_expired',
+                        'subscription_not_started': 'subscription_inactive',
+                        'trial_period': 'subscription_inactive', 'grace_period': 'subscription_inactive',
+                        'identity_scope_mismatch': 'identity_mismatch',
+                        'premium_entitlement_absent': 'none',
+                        'premium_source_binding_uncertain': 'source_unavailable'}
+        for profile in profiles:
+            if not profile.get('source_fingerprint') or not profile.get('observed_at'):
+                continue
+            entitlement = profile.get('entitlement') or {}
+            reason = reason_codes.get(profile.get('reason'), 'source_unavailable')
+            try:
+                self.sdk.emit('source_entitlement_observed', profile['user_id'],
+                    profile['observed_at'], {
+                        'source_hash': profile['source_fingerprint'],
+                        'starts_at': entitlement.get('starts_at'),
+                        'expires_at': entitlement.get('expires_at'),
+                        'adapter_version': 'adapty-profile-read-v1',
+                        'outcome': 'observed', 'reason_code': reason})
+            except Exception:
+                pass
+
+    def _notify_live_source_observations(self, profiles):
+        if not profiles:
+            return
+        items = []
+        for profile in profiles:
+            if not profile.get('source_fingerprint') or not profile.get('observed_at'):
+                continue
+            entitlement = profile.get('entitlement') or {}
+            items.append({'user_id': profile['user_id'],
+                'source_fingerprint': profile['source_fingerprint'],
+                'observed_at': profile['observed_at'],
+                'starts_at': entitlement.get('starts_at'),
+                'expires_at': entitlement.get('expires_at'),
+                'reason': profile.get('reason')})
+        if items:
+            internal_request(self.key, self.lumen_url, 'POST',
+                '/internal/lumen/source-observed', {'items': items}, timeout=30)
 
     def _flush_sdk(self):
         while True:
@@ -343,7 +401,7 @@ class RecoveryService:
     def scenario_now(self):
         db = _conn(self.db_path)
         try:
-            return domain.logical_now(db)
+            return datetime.now(timezone.utc) if _meta(db, 'scenario') == 'live_adapty' else domain.logical_now(db)
         finally:
             db.close()
 
@@ -394,7 +452,7 @@ class RecoveryService:
             raise RecoveryError('Source pagination is incomplete', 502)
         return items
 
-    def _observations(self):
+    def _observations(self, fresh_live_ids=None):
         gaps = []
         def pages(base, path, label):
             try:
@@ -404,8 +462,16 @@ class RecoveryService:
                 return []
         providers = pages(self.provider_url, '/internal/provider/accounts', 'provider_registry')
         evidence = pages(self.provider_url, '/internal/provider/evidence', 'provider_evidence')
-        profiles = pages(self.provider_url, '/internal/adapty/profiles', 'adapty_profiles')
         manifest = self._manifest()
+        if manifest.get('scenario') == 'live_adapty' and fresh_live_ids:
+            try:
+                refresh = internal_request(self.key, self.provider_url, 'POST',
+                    '/internal/live/refresh', {'user_ids': fresh_live_ids}, timeout=60)
+                if refresh.get('observed') != len(fresh_live_ids):
+                    gaps.append('live_source_observation_incomplete')
+            except Exception as exc:
+                gaps.append('live_source_refresh:'+(str(exc.status) if isinstance(exc, InternalHTTPError) else type(exc).__name__))
+        profiles = pages(self.provider_url, '/internal/adapty/profiles', 'adapty_profiles')
         source_history = (pages(self.provider_url, '/internal/provider/history', 'official_source_history')
                           if manifest.get('scenario') == 'offline' else [])
         try:
@@ -414,6 +480,9 @@ class RecoveryService:
             gaps.append('adapty_catalog:'+(str(exc.status) if isinstance(exc, InternalHTTPError) else type(exc).__name__))
             catalog = {'items': [], 'revision': None}
         clients = pages(self.lumen_url, '/internal/lumen/accounts', 'client_registry')
+        if manifest.get('scenario') == 'live_adapty' and fresh_live_ids:
+            fresh_profiles = [item for item in profiles if item.get('user_id') in set(fresh_live_ids)]
+            self._notify_live_source_observations(fresh_profiles)
         history_hash = hashlib.sha256()
         for item in source_history:
             history_hash.update(domain.canonical(item).encode('utf-8'))
@@ -430,21 +499,39 @@ class RecoveryService:
             if row.get('user_id'):
                 evidence_by_id.setdefault(row['user_id'], []).append(row)
         profiles_by_id = {row['user_id']: row for row in profiles}
+        entitlements_by_id = {row['user_id']: row.get('entitlement') for row in profiles
+                              if row.get('entitlement')}
         clients_by_id = {row['user_id']: row for row in clients}
         scope_ids = sorted(set(provider_by_id) | set(clients_by_id)
                            | {row['user_id'] for row in evidence if row.get('user_id')})
+        if manifest.get('scenario') == 'live_adapty':
+            live_source = internal_request(self.key, self.provider_url, 'GET', '/internal/live/status')
+            if live_source.get('account_count') != len(providers):
+                gaps.append('live_registry_count_mismatch')
+            if live_source.get('observed_count') != len(providers):
+                gaps.append('live_profiles_not_fully_observed')
+            if live_source.get('identity_match_count') != len(providers):
+                gaps.append('live_identity_scope_mismatch')
+            complete = not gaps
+        else:
+            live_source = None
+            complete = not gaps
         return {'provider_accounts': providers, 'provider_evidence': evidence,
                 'adapty_profiles': profiles, 'catalog': catalog,
                 'lumen_accounts': clients, 'provider_by_id': provider_by_id,
                 'evidence_by_id': evidence_by_id, 'profiles_by_id': profiles_by_id,
+                'entitlement_evidence': [item for item in entitlements_by_id.values()],
+                'entitlement_by_id': entitlements_by_id, 'live_source': live_source,
                 'clients_by_id': clients_by_id, 'scope_ids': scope_ids,
                 'source_history_summary': source_history_summary,
                 'observed_at': self.wall_now(), 'scenario_observed_at': iso(self.scenario_now()),
-                'complete': not gaps, 'gaps': gaps,
+                'complete': complete, 'gaps': gaps,
                 'orphan_provider_records': sum(not row.get('user_id') for row in evidence)}
 
     def _classify(self, observations, incident):
         manifest = self._manifest()
+        if manifest.get('scenario') == 'live_adapty':
+            return self._classify_live(observations, incident)
         now = self.scenario_now()
         start, end = parse_time(incident['window_start']), parse_time(incident['window_end'])
         supported = manifest['scenario'] in ('stripe', 'paddle', 'custom')
@@ -571,6 +658,108 @@ class RecoveryService:
                          'catalog_mapped': bool(evidence and (manifest['scenario'], evidence['product_id'], evidence['price_id']) in mapped)})
         return rows
 
+    def _classify_live(self, observations, incident):
+        app_id = self._manifest().get('app')
+        now = datetime.now(timezone.utc)
+        signature = incident.get('cohort_signature') or {}
+        rows = []
+        for user_id in observations['scope_ids']:
+            provider = observations['provider_by_id'].get(user_id)
+            client = observations['clients_by_id'].get(user_id)
+            profile = observations['profiles_by_id'].get(user_id)
+            entitlement = observations['entitlement_by_id'].get(user_id)
+            gate = client.get('gate') if client else {'allowed': None, 'reason': 'client_not_observed'}
+            identity_ok = bool(provider and client and profile
+                and provider.get('identity_status') == 'mapped'
+                and client.get('identity_status') == 'mapped'
+                and provider.get('provider_customer_id') == client.get('provider_customer_id') == user_id
+                and profile.get('identity_match') and profile.get('user_id') == user_id
+                and profile.get('app_id') == app_id)
+            status, reason, eligible = 'inconclusive', 'source_unavailable', False
+            active = False
+            source_fresh = False
+            if profile and profile.get('observed_at'):
+                try:
+                    age = (now-parse_time(profile['observed_at'])).total_seconds()
+                    source_fresh = 0 <= age <= domain.FRESHNESS_TTL
+                except RecoveryError:
+                    pass
+            if not observations['complete']:
+                reason = 'coverage_incomplete'
+            elif not identity_ok:
+                reason = 'identity_unknown'
+            elif not source_fresh:
+                reason = 'adapty_profile_stale'
+            elif profile.get('status') != 'active' or not entitlement:
+                if profile.get('status') == 'inactive':
+                    status, reason = 'legitimate_denial', profile.get('reason', 'premium_entitlement_inactive')
+                else:
+                    reason = profile.get('reason', 'premium_entitlement_uncertain')
+            else:
+                try:
+                    active = (parse_time(entitlement['starts_at']) <= now
+                              < parse_time(entitlement['expires_at'])
+                              and entitlement.get('is_in_grace_period') is False
+                              and entitlement.get('app_id') == app_id
+                              and entitlement.get('user_id') == user_id
+                              and entitlement.get('provider_customer_id') == user_id)
+                except (KeyError, RecoveryError, TypeError):
+                    active = False
+                if not active:
+                    status, reason = 'legitimate_denial', 'premium_entitlement_not_current'
+                elif client is None:
+                    reason = 'client_access_not_observed'
+                elif not client.get('policy_enabled') or gate.get('reason') == 'policy_restricted':
+                    status, reason = 'policy_denial', 'policy_restricted'
+                elif gate.get('allowed') is True:
+                    status, reason = 'healthy', 'access_allowed'
+                else:
+                    tag = client.get('delivery_signature') or {}
+                    try:
+                        signature_age = abs((parse_time(incident['occurred_at'])
+                            -parse_time(tag.get('occurred_at'))).total_seconds())
+                        tag_time = parse_time(tag.get('occurred_at'))
+                        in_incident_window = (parse_time(incident['window_start']) <= tag_time
+                                              < parse_time(incident['window_end']))
+                    except (KeyError, RecoveryError, TypeError):
+                        signature_age = float('inf')
+                        in_incident_window = False
+                    signature_match = bool(signature and tag
+                        and tag.get('handler_version') == signature.get('handler_version')
+                        and tag.get('config_version') == signature.get('config_version')
+                        and signature_age <= 120 and in_incident_window)
+                    if signature_match:
+                        status, reason, eligible = 'confirmed', 'access_not_delivered', True
+                    else:
+                        status, reason = 'potential', 'unmatched_delivery_discrepancy'
+            current_profile = bool(active and profile and profile.get('status') == 'active')
+            refs = []
+            if entitlement:
+                refs.append('adapty://entitlement/'+user_id)
+            if profile:
+                refs.append('adapty://profile/'+user_id)
+            if client:
+                refs.append('lumen://access/'+user_id)
+            rows.append({'id': user_id, 'status': status, 'reason': reason,
+                'eligible': bool(eligible), 'provider': 'adapty',
+                'product_id': (entitlement or {}).get('product_id'), 'price_id': None,
+                'payment_state': recovery_live.PAYMENT_VERIFICATION,
+                'adapty_active': current_profile, 'source_active': current_profile,
+                'gate': {'allowed': gate.get('allowed'),
+                         'reason': gate.get('reason', 'client_not_observed')},
+                'evidence_refs': refs,
+                'evidence_hash': (entitlement or {}).get('source_fingerprint'),
+                'occurred_at': incident.get('occurred_at'),
+                'observed_at': (entitlement or {}).get('observed_at') or (profile or {}).get('observed_at'),
+                'identity_revision': (client or {}).get('identity_revision'),
+                'policy_revision': (client or {}).get('policy_revision'),
+                'projection_revision': (client or {}).get('projection_revision'),
+                'cache_revision': (client or {}).get('cache_revision'),
+                'adapty_revision': (profile or {}).get('source_revision'),
+                'catalog_mapped': None,
+                'entitlement_evidence': entitlement})
+        return rows
+
     @staticmethod
     def _latest_evidence(records):
         def key(row):
@@ -662,9 +851,13 @@ class RecoveryService:
         finally:
             db.close()
 
-    def _capture_snapshot(self, incident_id):
+    def _capture_snapshot(self, incident_id, fresh_live_ids=None):
         incident = self._get_incident(incident_id)
-        observations = self._observations()
+        if (self._manifest().get('scenario') == 'live_adapty'
+                and not incident.get('snapshot_id') and fresh_live_ids is None):
+            fresh_live_ids = [item['user_id'] for item in self._pages(
+                self.provider_url, '/internal/provider/accounts')]
+        observations = self._observations(fresh_live_ids=fresh_live_ids)
         if not incident.get('cohort_signature'):
             trigger_evidence = self._latest_evidence(
                 observations['evidence_by_id'].get(incident['trigger_user_id'], []))
@@ -687,6 +880,18 @@ class RecoveryService:
                         'evidence_hash': trigger_evidence['evidence_hash'],
                     }
         history = self._collector_events(incident)
+        if self._manifest().get('scenario') == 'live_adapty' and not incident.get('cohort_signature'):
+            trigger = next((event for event in history
+                            if event.get('event_id') == incident.get('trigger_event_id')),
+                           None)
+            details = {} if trigger is None else trigger.get('details', {})
+            if (trigger and details.get('decision') == 'deny'
+                    and details.get('initiator') == 'customer_demo'):
+                incident['cohort_signature'] = {
+                    'handler_version': details.get('projection_version'),
+                    'config_version': details.get('cache_version'),
+                    'occurred_at': trigger['occurred_at'],
+                    'trigger_event_id': trigger['event_id']}
         accounts = self._classify(observations, incident)
         event_users = {event.get('app_user_id') for event in history if event.get('app_user_id')}
         window_start, window_end = parse_time(incident['window_start']), parse_time(incident['window_end'])
@@ -719,6 +924,7 @@ class RecoveryService:
                     'observation_basis': 'current_state_at_snapshot; historical_events_are_actual_received_events',
                     'accounts': accounts,
                     'provider_evidence': observations['provider_evidence'],
+                    'entitlement_evidence': observations['entitlement_evidence'],
                     'provider_accounts': observations['provider_accounts'],
                     'adapty_profiles': observations['adapty_profiles'],
                     'adapty_catalog': observations['catalog'],
@@ -730,6 +936,7 @@ class RecoveryService:
                                  'observed_at': observations['observed_at'],
                                  'provider_accounts': len(observations['provider_accounts']),
                                  'provider_evidence': len(observations['provider_evidence']),
+                                 'entitlement_evidence': len(observations['entitlement_evidence']),
                                  'adapty_profiles': len(observations['adapty_profiles']),
                                  'lumen_accounts': len(observations['lumen_accounts']),
                                  'scope_accounts': len(observations['scope_ids']),
@@ -884,7 +1091,7 @@ class RecoveryService:
                                           'trigger_event_id': trigger_event_id})[:20]
         incident = {'id': incident_id, 'run_id': manifest['run_id'], 'app': manifest['app'],
                     'environment': manifest['environment'], 'window_start': iso(start),
-                    'window_end': iso(end), 'trigger_user_id': user_id,
+                    'window_end': iso(end), 'occurred_at': iso(at), 'trigger_user_id': user_id,
                     'snapshot_id': None, 'first_snapshot_id': None,
                     'status': 'queued', 'trigger_event_id': trigger_event_id}
         db = _conn(self.db_path)
@@ -962,6 +1169,8 @@ class RecoveryService:
         snapshot = self._latest_snapshot(incident['id'])
         if snapshot is None:
             raise RecoveryError('Incident has no completed snapshot', 409)
+        if snapshot['manifest'].get('scenario') == 'live_adapty':
+            return self._create_live_plan(ids, incident, snapshot)
         account_by_id = {row['id']: row for row in snapshot['accounts']}
         probe_only = self._unverified_target_ids(incident['id'])
         selected = []
@@ -1073,6 +1282,96 @@ class RecoveryService:
             db.close()
         self._record('plan_created', {'plan_id': plan['id'], 'plan_hash': plan['plan_hash'],
                                      'snapshot_id': plan['snapshot_id'], 'target_count': len(ids)})
+        return plan
+
+    def _create_live_plan(self, ids, incident, snapshot):
+        account_by_id = {row['id']: row for row in snapshot['accounts']}
+        profiles_by_id = {row['user_id']: row for row in snapshot['adapty_profiles']}
+        entitlement_by_id = {row['user_id']: row for row in snapshot['entitlement_evidence']}
+        probe_only = self._unverified_target_ids(incident['id'])
+        selected = {}
+        for user_id in ids:
+            account = account_by_id.get(user_id)
+            probe_retry = (user_id in probe_only and account and account.get('status') in
+                           ('healthy', 'pending_verification') and account.get('gate', {}).get('allowed'))
+            resync_retry = bool(account and account.get('status') == 'pending_verification'
+                                and account.get('eligible') and not account.get('gate', {}).get('allowed'))
+            if account is None or not (account.get('eligible') and account.get('status') == 'confirmed'
+                    or probe_retry or resync_retry):
+                raise RecoveryError('Account is not eligible: '+user_id, 409)
+            selected[user_id] = account
+            if probe_retry:
+                continue
+            entitlement = entitlement_by_id.get(user_id)
+            profile = profiles_by_id.get(user_id)
+            if (not entitlement or not profile or profile.get('status') != 'active'
+                    or not profile.get('identity_match')
+                    or entitlement.get('source_fingerprint') != account.get('evidence_hash')):
+                raise RecoveryError('Account source entitlement is not verified: '+user_id, 409)
+        created_wall = datetime.now(timezone.utc)
+        expires_wall = created_wall+timedelta(seconds=300)
+        entries = []
+        for user_id in ids:
+            account = selected[user_id]
+            if (account.get('status') == 'healthy'
+                    or account.get('status') == 'pending_verification'
+                    and user_id in probe_only and account.get('gate', {}).get('allowed')):
+                continue
+            profile = profiles_by_id[user_id]
+            entitlement = entitlement_by_id[user_id]
+            preconditions = {'projection_revision': account['projection_revision'],
+                'identity_revision': account['identity_revision'],
+                'policy_revision': account['policy_revision'],
+                'profile_revision': profile['source_revision'],
+                'profile_hash': entitlement['entitlement_hash'],
+                'source_fingerprint': entitlement['source_fingerprint'],
+                'evidence_hash': entitlement['source_fingerprint']}
+            entries.append(self._entry(user_id, 'lumen', 'resync_access',
+                {'product_id': entitlement['product_id'],
+                 'transaction_id': entitlement['transaction_id']}, preconditions))
+        for user_id in ids:
+            account = selected[user_id]
+            entries.append(self._entry(user_id, 'lumen', 'verify_gate',
+                {'feature': recovery_scenarios.FEATURE},
+                {'projection_revision': account['projection_revision'],
+                 'policy_revision': account['policy_revision']}))
+        manifest = snapshot['manifest']
+        requires_resync = any(entry['type'] == 'resync_access' for entry in entries)
+        steps = []
+        if requires_resync:
+            steps.append({'id': 'resync', 'title': 'Resync Lumen access',
+                 'description': 'Deliver only the freshly verified Adapty entitlements to the selected Lumen accounts.',
+                 'owner': 'lumen', 'status': 'ready', 'selected_ids': ids,
+                 'expected_effect': 'Restore the current premium entitlement at the application gate.'})
+        steps.append({'id': 'verify', 'title': 'Verify the feature gate',
+             'description': 'Probe the actual Lumen gate for every selected account after resync.',
+             'owner': 'lumen', 'status': 'ready', 'selected_ids': ids,
+             'expected_effect': 'Confirm access for the selected premium feature.'})
+        plan = {'id': 'plan-'+uuid4().hex, 'incident_id': incident['id'],
+            'snapshot_id': snapshot['id'], 'snapshot_hash': snapshot['snapshot_hash'],
+            'app': manifest['app'], 'environment': manifest['environment'],
+            'run_id': manifest['run_id'], 'provider': 'adapty',
+            'recovery_basis': 'adapty_entitlement_delivery', 'ids': ids,
+            'target_count': len(ids), 'created_at': iso(created_wall),
+            'scenario_created_at': iso(created_wall), 'expires_at': iso(expires_wall),
+            'scenario_expires_at': iso(expires_wall), 'timestamp_kind': 'wall_clock',
+            'entries': entries, 'steps': steps,
+            'expected_effect': {'entitlement_delivery_target': sum(
+                    entry['type'] == 'resync_access' for entry in entries),
+                'access_target': len(ids), 'manual_grant': False, 'provider_writes': 0,
+                'payment_verification': recovery_live.PAYMENT_VERIFICATION}}
+        plan['plan_hash'] = digest(plan)
+        db = _conn(self.db_path)
+        try:
+            db.execute('INSERT INTO plans VALUES(?,?,?,?,?,?,?,?,?)',
+                (plan['id'], plan['plan_hash'], plan['incident_id'], plan['snapshot_id'],
+                 _json(plan), 'pending_approval', iso(created_wall), iso(expires_wall),
+                 plan['scenario_expires_at']))
+        finally:
+            db.close()
+        self._record('plan_created', {'plan_id': plan['id'], 'plan_hash': plan['plan_hash'],
+            'snapshot_id': snapshot['id'], 'target_count': len(ids),
+            'recovery_basis': 'adapty_entitlement_delivery'})
         return plan
 
     @staticmethod
@@ -1203,6 +1502,25 @@ class RecoveryService:
             raise RecoveryError('Plan scenario-clock TTL expired', 409)
         if plan['app'] != self._manifest()['app'] or plan['environment'] != self._manifest()['environment'] or plan['run_id'] != self._manifest()['run_id']:
             raise RecoveryError('Plan scope changed', 409)
+        if plan.get('recovery_basis') == 'adapty_entitlement_delivery':
+            observations = self._observations(fresh_live_ids=plan['ids'])
+            incident = self._get_incident(plan['incident_id'])
+            current = {row['id']: row for row in self._classify(observations, incident)}
+            snapshot = self._load_snapshot(plan['snapshot_id'])
+            original = {row['id']: row for row in snapshot['accounts']}
+            probe_only = self._unverified_target_ids(plan['incident_id'])
+            for user_id in plan['ids']:
+                before, after = original[user_id], current.get(user_id)
+                probe_retry = (user_id in probe_only and after and after.get('status') == 'healthy'
+                               and after.get('gate', {}).get('allowed'))
+                if after is None or not (after.get('eligible') and after.get('status') == 'confirmed'
+                                         or probe_retry):
+                    raise RecoveryError('Plan preflight failed: account is no longer eligible', 409)
+                for key in ('evidence_hash', 'identity_revision', 'policy_revision',
+                            'projection_revision', 'cache_revision', 'adapty_revision'):
+                    if before.get(key) != after.get(key):
+                        raise RecoveryError('Plan preflight failed: '+key+' changed', 409)
+            return observations
         observations = self._observations()
         incident = self._get_incident(plan['incident_id'])
         current = {row['id']: row for row in self._classify(observations, incident)}
@@ -1413,6 +1731,46 @@ class RecoveryService:
                 self._save_action(entry, plan_id, 'blocked', result={'reason': 'activation_prerequisite_not_verified'})
                 outcomes[entry['id']] = 'blocked'
                 continue
+            if plan.get('recovery_basis') == 'adapty_entitlement_delivery':
+                prior = self._existing_action(entry['id'])
+                if prior and prior['started_at']:
+                    result, status = self._operation_result(entry, plan_id, 'lumen',
+                        '/internal/lumen/resync', {}, allow_new=False)
+                    self._save_action(entry, plan_id, status, result=result,
+                        evidence_ref='adapty://entitlement/'+entry['account_id'])
+                    outcomes[entry['id']] = status
+                    continue
+                user_id = entry['account_id']
+                fresh = self._observations(fresh_live_ids=[user_id])
+                current = next((item for item in self._classify(fresh, self._get_incident(plan['incident_id']))
+                                if item['id'] == user_id), None)
+                entitlement = fresh['entitlement_by_id'].get(user_id)
+                profile = fresh['profiles_by_id'].get(user_id)
+                preconditions = entry['preconditions']
+                if (not current or current.get('status') != 'confirmed' or not current.get('eligible')
+                        or not profile or profile.get('status') != 'active'
+                        or not entitlement
+                        or entitlement.get('source_fingerprint') != preconditions['source_fingerprint']
+                        or current.get('identity_revision') != preconditions['identity_revision']
+                        or current.get('policy_revision') != preconditions['policy_revision']
+                        or current.get('projection_revision') != preconditions['projection_revision']):
+                    self._save_action(entry, plan_id, 'blocked',
+                        result={'reason': 'fresh_adapty_entitlement_precondition_changed'})
+                    outcomes[entry['id']] = 'blocked'
+                    continue
+                body = {'user_id': user_id,
+                    'expected_revision': preconditions['projection_revision'],
+                    'entitlement': {'product_id': entitlement['product_id'],
+                        'expires_at': entitlement['expires_at'],
+                        'entitlement_hash': entitlement['entitlement_hash'],
+                        'transaction_id': entitlement['transaction_id'],
+                        'source_fingerprint': entitlement['source_fingerprint']}}
+                result, status = self._operation_result(entry, plan_id, 'lumen',
+                    '/internal/lumen/resync', body, allow_new=not resuming)
+                self._save_action(entry, plan_id, status, result=result,
+                    evidence_ref='adapty://entitlement/'+user_id)
+                outcomes[entry['id']] = status
+                continue
             fresh = self._observations()
             current = next((item for item in self._classify(fresh, self._get_incident(plan['incident_id']))
                             if item['id'] == entry['account_id']), None)
@@ -1471,16 +1829,33 @@ class RecoveryService:
                               evidence_ref='lumen://probe/'+entry['account_id'])
             outcomes[entry['id']] = status
 
-        access = self._capture_snapshot(plan['incident_id'])
+        access = self._capture_snapshot(plan['incident_id'],
+            fresh_live_ids=plan['ids'] if plan.get('recovery_basis') == 'adapty_entitlement_delivery' else None)
         profiles = {item['user_id']: item for item in access['adapty_profiles']}
+        entitlement_by_id = {item['user_id']: item for item in access.get('entitlement_evidence', [])}
         evidence_by_id = {}
         for item in access['provider_evidence']:
             if item.get('user_id'):
                 evidence_by_id.setdefault(item['user_id'], []).append(item)
         activated_ids = set()
+        plan_snapshot_accounts = {row['id']: row for row in self._load_snapshot(plan['snapshot_id'])['accounts']}
         for user_id in plan['ids']:
             profile = profiles.get(user_id)
             source = self._latest_evidence(evidence_by_id.get(user_id, []))
+            if plan.get('recovery_basis') == 'adapty_entitlement_delivery':
+                entitlement = entitlement_by_id.get(user_id)
+                try:
+                    active = bool(profile and profile.get('status') == 'active'
+                        and profile.get('identity_match') and entitlement
+                        and entitlement.get('source_fingerprint') == plan_snapshot_accounts[user_id].get('evidence_hash')
+                        and parse_time(entitlement['starts_at']) <= self.scenario_now()
+                        < parse_time(entitlement['expires_at'])
+                        and entitlement.get('is_in_grace_period') is False)
+                except (KeyError, RecoveryError, TypeError):
+                    active = False
+                if active:
+                    activated_ids.add(user_id)
+                continue
             if (profile and source and profile.get('status') == 'active'
                     and profile.get('product_id') == source.get('product_id')
                     and profile.get('transaction_id') == source.get('transaction_id')
@@ -1508,11 +1883,16 @@ class RecoveryService:
                           and user_id in verified_probe_ids}
         accessible = len(accessible_ids)
         result = {'plan_id': plan_id, 'snapshot_id': access['id'],
-                  'target_count': len(plan['ids']), 'activation_verified': activated,
+                  'target_count': len(plan['ids']),
                   'access_verified': accessible, 'unresolved': len(plan['ids'])-accessible,
                   'action_statuses': outcomes,
                   'unresolved_ids': [user_id for user_id in plan['ids']
                                      if user_id not in accessible_ids]}
+        if plan.get('recovery_basis') == 'adapty_entitlement_delivery':
+            result.update(entitlement_verified=activated,
+                payment_verification=recovery_live.PAYMENT_VERIFICATION)
+        else:
+            result['activation_verified'] = activated
         status = 'completed' if accessible == len(plan['ids']) else 'partial'
         db = _conn(self.db_path)
         try:
@@ -1577,6 +1957,8 @@ class RecoveryService:
 
     def _report(self, incident_id=None):
         manifest = self._manifest()
+        if manifest.get('scenario') == 'live_adapty':
+            return self._report_live(incident_id)
         incident = None
         db = _conn(self.db_path)
         try:
@@ -1751,6 +2133,183 @@ class RecoveryService:
                           for item in plans],
                 'jobs': jobs}
 
+    def _report_live(self, incident_id=None):
+        manifest = self._manifest()
+        db = _conn(self.db_path)
+        try:
+            incidents = [json.loads(row['incident_json']) for row in db.execute(
+                'SELECT incident_json FROM incidents ORDER BY created_at DESC,rowid DESC')]
+            incident = next((item for item in incidents if item['id'] == incident_id), None) if incident_id else (incidents[0] if incidents else None)
+            if incident_id and incident is None:
+                raise RecoveryError('Unknown incident', 404)
+        finally:
+            db.close()
+        snapshot = self._latest_snapshot(incident['id']) if incident else None
+        first_snapshot = (self._load_snapshot(incident['first_snapshot_id'])
+                          if incident and incident.get('first_snapshot_id') else None)
+        gaps = []
+        try:
+            observations = self._observations()
+            accounts = (self._classify(observations, incident) if incident and snapshot
+                        else self._unclassified_live_accounts(observations))
+            if snapshot:
+                coverage = {**snapshot['coverage'],
+                    'complete': bool(snapshot['coverage']['complete'] and not observations['gaps']),
+                    'gaps': list(dict.fromkeys(snapshot['coverage']['gaps']+observations['gaps'])),
+                    'observed_at': observations['observed_at']}
+            else:
+                coverage = {'complete': observations['complete'], 'gaps': observations['gaps'],
+                    'observed_at': observations['observed_at'],
+                    'provider_accounts': len(observations['provider_accounts']),
+                    'provider_evidence': len(observations['provider_evidence']),
+                    'entitlement_evidence': len(observations['entitlement_evidence']),
+                    'adapty_profiles': len(observations['adapty_profiles']),
+                    'lumen_accounts': len(observations['lumen_accounts'])}
+        except Exception as exc:
+            observations = None
+            gaps.append('source_unavailable:'+type(exc).__name__)
+            accounts = snapshot['accounts'] if snapshot else []
+            coverage = {**(snapshot['coverage'] if snapshot else {}),
+                        'complete': False, 'gaps': gaps, 'observed_at': self.wall_now()}
+        try:
+            collector = internal_request(self.key, self.lumen_url,
+                'GET', '/internal/lumen/collector-coverage')
+            coverage['collector'] = collector
+            if collector.get('queued') or collector.get('dropped'):
+                coverage['complete'] = False
+                coverage['gaps'] = list(dict.fromkeys(coverage.get('gaps', [])+
+                                                       ['collector_delivery_incomplete']))
+        except Exception:
+            coverage['complete'] = False
+            coverage['gaps'] = list(dict.fromkeys(coverage.get('gaps', [])+
+                                                   ['collector_coverage_unavailable']))
+        plans = [plan for plan in self._plans() if incident and plan['incident_id'] == incident['id']]
+        plan_ids = {plan['id'] for plan in plans}
+        actions = [action for action in self._actions() if action['plan_id'] in plan_ids]
+        jobs = self._jobs()
+        active_plans = [plan for plan in plans if plan['status'] != 'pending_approval']
+        targets = self._target_ids(active_plans)
+        verify_by_user = {}
+        for plan in active_plans:
+            for entry in plan['entries']:
+                if entry['type'] != 'verify_gate':
+                    continue
+                action = self._existing_action(entry['id'])
+                action_result = json.loads(action['result']) if action and action['result'] else {}
+                verify_by_user[entry['account_id']] = bool(action and action['status'] == 'verified'
+                                                            and action_result.get('allowed') is True)
+        entitlement_verified_ids, accessible_ids = set(), set()
+        if observations:
+            profiles = observations['profiles_by_id']
+            entitlements = observations['entitlement_by_id']
+            clients = observations['clients_by_id']
+            now = datetime.now(timezone.utc)
+            for user_id in targets:
+                profile, entitlement = profiles.get(user_id), entitlements.get(user_id)
+                client = clients.get(user_id)
+                if self._live_entitlement_current(profile, entitlement, user_id, now):
+                    entitlement_verified_ids.add(user_id)
+                    if client and client['gate'].get('allowed') and verify_by_user.get(user_id):
+                        accessible_ids.add(user_id)
+            by_id = {item['id']: item for item in accounts}
+            for user_id in targets:
+                row = by_id.get(user_id)
+                if row is None:
+                    continue
+                if user_id in accessible_ids:
+                    row['status'], row['reason'], row['eligible'] = 'restored', 'entitlement_and_access_verified', False
+                elif user_id in entitlement_verified_ids:
+                    row['status'], row['reason'] = 'pending_verification', 'gate_access_not_verified'
+                    row['eligible'] = bool(row.get('eligible') or
+                        (row['gate'].get('allowed') and user_id in
+                         self._unverified_target_ids(incident['id'])))
+        confirmed = set(incident.get('confirmed_ids', [])) if incident else set()
+        assessment = self._snapshot_summary({'accounts': accounts}) if incident else {
+            'in_scope': len(accounts), 'evaluated': 0, 'confirmed': 0, 'inconclusive': 0}
+        summary = {'in_scope': assessment['in_scope'], 'evaluated': assessment['evaluated'],
+            'confirmed': len(confirmed), 'inconclusive': assessment['inconclusive'],
+            'excluded': sum(row['id'] not in confirmed and row['status'] not in ('inconclusive', 'potential')
+                            for row in accounts),
+            'potential': sum(row['status'] == 'potential' for row in accounts)}
+        public_incident = None if incident is None else {
+            key: incident[key] for key in ('id', 'window_start', 'window_end', 'occurred_at',
+                                            'trigger_user_id', 'snapshot_id', 'status')}
+        access_verified = len(accessible_ids)
+        if public_incident and targets:
+            public_incident['status'] = ('access_verified' if access_verified == len(targets) else
+                'partial_recovery' if access_verified else 'recovery_unresolved')
+        fault = internal_request(self.key, self.lumen_url, 'GET', '/internal/lumen/live/status')
+        return {'mode': 'LIVE_ADAPTY_SEEDED',
+            'manifest': {**manifest, 'logical_now': self.wall_now(), 'wall_now': self.wall_now(),
+                         'time_basis': 'wall_clock_for_adapty_entitlements_and_lumen_access'},
+            'payment_verification': recovery_live.PAYMENT_VERIFICATION,
+            'provenance': recovery_live.PROVENANCE,
+            'catalog': observations['catalog'] if observations else None,
+            'cli_catalog': observations['catalog'] if observations else None,
+            'incident': public_incident,
+            'summary': summary, 'assessment': assessment,
+            'incidents': [{'id': item['id'], 'trigger_user_id': item['trigger_user_id'],
+                'status': item['status'], 'confirmed': len(item.get('confirmed_ids', [])),
+                'inconclusive': item.get('assessment_summary', {}).get('inconclusive', 0)}
+                for item in incidents],
+            'recovery': {'target_count': len(targets),
+                'entitlement_verified': len(entitlement_verified_ids),
+                'access_verified': access_verified,
+                'unresolved': max(0, len(targets)-access_verified),
+                'unresolved_ids': sorted(targets-accessible_ids),
+                'payment_verification': recovery_live.PAYMENT_VERIFICATION,
+                'root_cause_status': 'correlated_delivery_issue' if confirmed else 'not_assessed',
+                'root_cause_certainty': 'correlated' if confirmed else 'not_assessed',
+                'latest_plan_id': plans[-1]['id'] if plans else None},
+            'accounts': accounts, 'coverage': coverage, 'actions': actions,
+            'fault_status': fault,
+            'plans': [{'id': plan['id'], 'plan_hash': plan['plan_hash'],
+                'incident_id': plan['incident_id'], 'snapshot_id': plan['snapshot_id'],
+                'status': plan['status'], 'target_count': plan['target_count'],
+                'created_at': plan['created_at'], 'expires_at': plan['expires_at']}
+                for plan in plans], 'jobs': jobs}
+
+    @staticmethod
+    def _live_entitlement_current(profile, entitlement, user_id, now):
+        if not profile or not entitlement or profile.get('status') != 'active' or not profile.get('identity_match'):
+            return False
+        try:
+            age = (now-parse_time(profile['observed_at'])).total_seconds()
+            return bool(0 <= age <= domain.FRESHNESS_TTL
+                and entitlement.get('user_id') == user_id
+                and entitlement.get('provider_customer_id') == user_id
+                and entitlement.get('app_id') == recovery_live.APP_ID
+                and entitlement.get('is_in_grace_period') is False
+                and parse_time(entitlement['starts_at']) <= now < parse_time(entitlement['expires_at']))
+        except (KeyError, RecoveryError, TypeError):
+            return False
+
+    def _unclassified_live_accounts(self, observations):
+        result = []
+        for user_id in observations['scope_ids']:
+            provider = observations['provider_by_id'].get(user_id)
+            client = observations['clients_by_id'].get(user_id)
+            profile = observations['profiles_by_id'].get(user_id)
+            entitlement = observations['entitlement_by_id'].get(user_id)
+            gate = client.get('gate') if client else {'allowed': None, 'reason': 'client_not_observed'}
+            result.append({'id': user_id, 'status': 'unclassified', 'reason': 'no_incident_scan',
+                'eligible': False, 'provider': 'adapty',
+                'product_id': (entitlement or {}).get('product_id'), 'price_id': None,
+                'payment_state': recovery_live.PAYMENT_VERIFICATION,
+                'adapty_active': bool(profile and profile.get('status') == 'active'),
+                'source_active': bool(profile and profile.get('status') == 'active'),
+                'gate': {'allowed': gate.get('allowed'), 'reason': gate.get('reason', 'client_not_observed')},
+                'evidence_refs': (['adapty://entitlement/'+user_id] if entitlement else []),
+                'evidence_hash': (entitlement or {}).get('source_fingerprint'),
+                'observed_at': (entitlement or {}).get('observed_at') or (profile or {}).get('observed_at'),
+                'identity_revision': (client or {}).get('identity_revision'),
+                'policy_revision': (client or {}).get('policy_revision'),
+                'projection_revision': (client or {}).get('projection_revision'),
+                'cache_revision': (client or {}).get('cache_revision'),
+                'adapty_revision': (profile or {}).get('source_revision'),
+                'catalog_mapped': None})
+        return result
+
     def _unclassified_accounts(self, observations):
         result = []
         manifest = self._manifest()
@@ -1823,6 +2382,29 @@ class RecoveryService:
     def _provider_get(self, path, query):
         if path == '/internal/manifest':
             return self._service_manifest(self.db_path)
+        if self.live_config:
+            if path == '/internal/provider/accounts':
+                return domain.provider_accounts(self.db_path, _one(query, 'cursor'), self._limit(query))
+            if path == '/internal/provider/evidence':
+                return domain.provider_evidence(self.db_path, _one(query, 'user'),
+                                                _one(query, 'cursor'), self._limit(query))
+            if path == '/internal/adapty/profile':
+                user_id = _one(query, 'user')
+                if user_id not in self.live_config['customer_user_ids']:
+                    raise RecoveryError('Unknown live account', 404)
+                recovery_live.refresh_profiles(self.db_path, self.live_config,
+                                               self.live_reader, [user_id])
+                try:
+                    return recovery_live.profile(self.db_path, user_id)
+                except recovery_live.LiveSourceError as exc:
+                    raise RecoveryError('Fresh Adapty profile read failed', exc.status) from exc
+            if path == '/internal/adapty/profiles':
+                return recovery_live.profiles(self.db_path, _one(query, 'cursor'), self._limit(query))
+            if path == '/internal/adapty/catalog':
+                return recovery_live.catalog(self.db_path)
+            if path == '/internal/live/status':
+                return recovery_live.status(self.db_path)
+            raise RecoveryError('Not found', 404)
         if domain.provider_fault_active(self.db_path, 'fault_provider_outage'):
             raise RecoveryError('Provider simulator is unavailable', 503)
         limited = domain.consume_provider_fault(self.db_path, 'fault_rate_limit_remaining')
@@ -1854,6 +2436,16 @@ class RecoveryService:
         raise RecoveryError('Not found', 404)
 
     def _provider_post(self, path, body):
+        if self.live_config:
+            if path == '/internal/live/refresh':
+                if not isinstance(body, dict) or set(body) != {'user_ids'}:
+                    raise RecoveryError('Live refresh fields do not match the contract')
+                try:
+                    return recovery_live.refresh_profiles(self.db_path, self.live_config,
+                        self.live_reader, body['user_ids'])
+                except ValueError as exc:
+                    raise RecoveryError(str(exc)) from exc
+            raise RecoveryError('Adapty source is read-only in live mode', 404)
         if path in ('/internal/adapty/catalog/repair', '/internal/adapty/validate'):
             if domain.provider_fault_active(self.db_path, 'fault_provider_outage'):
                 raise RecoveryError('Provider simulator is unavailable', 503)
@@ -1927,6 +2519,8 @@ class RecoveryService:
     def _lumen_get(self, path, query):
         if path == '/internal/manifest':
             return self._service_manifest(self.db_path)
+        if self.live_config and path == '/internal/lumen/live/status':
+            return domain.lumen_live_fault_status(self.db_path)
         if path == '/internal/lumen/accounts':
             return domain.lumen_accounts(self.db_path, _one(query, 'cursor'), self._limit(query))
         if path == '/internal/lumen/access':
@@ -1948,21 +2542,59 @@ class RecoveryService:
             if not isinstance(body, dict) or set(body) != {'user_id','expected_revision','entitlement','operation_key'}:
                 raise RecoveryError('Resync fields do not match the contract')
             prior = domain.lumen_action(self.db_path, body['operation_key'])
-            if prior:
+            if prior and not self.live_config:
                 return domain.lumen_resync(self.db_path, body)
             try:
                 profile = internal_request(self.key, self.provider_url, 'GET',
                     '/internal/adapty/profile?'+urlencode({'user': body['user_id']}))
             except Exception as exc:
                 raise RecoveryError('Fresh Adapty profile read failed', 503) from exc
+            if self.live_config:
+                self._emit_source_observations([profile])
             expected = body['entitlement']
+            source = (profile or {}).get('entitlement') or {}
             if (not profile or profile.get('status') != 'active'
-                    or profile.get('product_id') != expected.get('product_id')
-                    or profile.get('expires_at') != expected.get('expires_at')
-                    or profile.get('transaction_id') != expected.get('transaction_id')
-                    or profile.get('entitlement_hash') != expected.get('entitlement_hash')):
+                    or (source if self.live_config else profile).get('product_id') != expected.get('product_id')
+                    or (source if self.live_config else profile).get('expires_at') != expected.get('expires_at')
+                    or (source if self.live_config else profile).get('transaction_id') != expected.get('transaction_id')
+                    or (source if self.live_config else profile).get('entitlement_hash') != expected.get('entitlement_hash')
+                    or self.live_config and (not profile.get('identity_match')
+                        or profile.get('source_fingerprint') != expected.get('source_fingerprint'))):
                 raise RecoveryError('Fresh Adapty profile does not match requested entitlement', 409)
-            return domain.lumen_resync(self.db_path, body)
+            result = domain.lumen_resync(self.db_path, body)
+            if self.live_config and not result.get('duplicate'):
+                self._emit_projection_change(body['user_id'], result, body['operation_key'])
+            return result
+        if self.live_config and path == '/internal/lumen/source-observed':
+            if not isinstance(body, dict) or set(body) != {'items'} or not isinstance(body['items'], list):
+                raise RecoveryError('Source observation fields do not match the contract')
+            profiles = []
+            for item in body['items']:
+                if (not isinstance(item, dict) or set(item) != {'user_id','source_fingerprint',
+                        'observed_at','starts_at','expires_at','reason'}
+                        or item['user_id'] not in self.live_config['customer_user_ids']):
+                    raise RecoveryError('Source observation fields do not match the contract')
+                profiles.append({'user_id': item['user_id'],
+                    'source_fingerprint': item['source_fingerprint'],
+                    'observed_at': item['observed_at'], 'reason': item['reason'],
+                    'entitlement': {'starts_at': item['starts_at'], 'expires_at': item['expires_at']}})
+            self._emit_source_observations(profiles)
+            return {'accepted': len(profiles)}
+        if self.live_config and path == '/internal/lumen/live/inject':
+            required = {'user_ids','handler_version','config_version','occurred_at'}
+            if not isinstance(body, dict) or set(body) != required:
+                raise RecoveryError('Live fault fields do not match the contract')
+            try:
+                result = domain.lumen_live_inject_fault(self.db_path, body['user_ids'],
+                    body['handler_version'], body['config_version'], body['occurred_at'])
+            except (ValueError, KeyError) as exc:
+                raise RecoveryError(str(exc), 409) from exc
+            for item in result['accounts']:
+                self._emit_projection_change(item['user_id'], item,
+                    'live-fault-'+uuid4().hex, occurred_at=result['occurred_at'],
+                    handler_version=result['handler_version'],
+                    config_version=result['config_version'])
+            return {key: value for key, value in result.items() if key != 'accounts'}
         if path == '/internal/lumen/probe':
             if domain.lumen_fault_active(self.db_path, 'fault_probe_outage'):
                 raise RecoveryError('Lumen gate probe is unavailable', 503)
@@ -2015,20 +2647,146 @@ class RecoveryService:
     def _emit_gate(self, user_id, feature, result, initiator):
         if initiator == 'customer_demo' and domain.lumen_fault_active(self.db_path, 'fault_suppress_customer_telemetry'):
             return None
+        handler_version, config_version = 'lumen-projection-v2', 'lumen-cache-v2'
+        if self.live_config:
+            signature = domain.lumen_live_fault_status(self.db_path)
+            if signature['injected']:
+                handler_version = signature['handler_version']
+                config_version = signature['config_version']
         try:
             return self.sdk.emit('feature_access_decided', user_id, iso(self.scenario_now()), {
                 'feature': feature, 'decision': 'allow' if result['allowed'] else 'deny',
-                'reason_code': result['reason'], 'projection_version': 'lumen-projection-v2',
-                'cache_version': 'lumen-cache-v2', 'policy_version': 'access-policy-v2',
+                'reason_code': result['reason'], 'projection_version': handler_version,
+                'cache_version': config_version, 'policy_version': 'access-policy-v2',
                 'adapter_version': 'lumen-adapter-v2', 'initiator': initiator,
             })
         except Exception:
             # Telemetry is best effort; gate decisions must remain available.
             return None
 
+    def _emit_projection_change(self, user_id, result, action_id, *, occurred_at=None,
+                                handler_version=None, config_version=None):
+        if not self.sdk or not result or not result.get('before') or not result.get('after'):
+            return None
+        try:
+            return self.sdk.emit('access_projection_changed', user_id,
+                occurred_at or self.wall_now(), {
+                    'action_id': action_id, 'source_hash': result.get('source_hash') or 'unknown',
+                    'expected_revision': result['before']['projection_revision'],
+                    'policy_version': result.get('policy_version', 'premium-policy-v1'),
+                    'adapter_version': result.get('adapter_version', 'adapty-profile-read-v1'),
+                    'projection_version': handler_version or result.get('projection_version', 'lumen-projection-v2'),
+                    'cache_version': config_version or result.get('config_version', 'lumen-cache-v2'),
+                    'outcome': 'projection_updated', 'before': result['before'],
+                    'after': result['after'], 'cache_invalidated': bool(result['after'].get('invalidated'))})
+        except Exception:
+            return None
+
     def _require_demo(self):
         if not self.demo:
             raise RecoveryError('Demo controls are disabled', 404)
+
+    def _live_status(self):
+        if not self.live_config or self._manifest().get('scenario') != 'live_adapty':
+            raise RecoveryError('Live Adapty mode is not active', 404)
+        source = internal_request(self.key, self.provider_url, 'GET', '/internal/live/status')
+        fault = internal_request(self.key, self.lumen_url, 'GET', '/internal/lumen/live/status')
+        readiness = {'configuration': True,
+            'source_registry': source.get('account_count') == 100,
+            'all_profiles_observed': source.get('observed_count') == 100,
+            'identity_scope_match': source.get('identity_match_count') == 100}
+        ready = all(readiness.values())
+        db = _conn(self.db_path)
+        try:
+            incident = db.execute('SELECT incident_json FROM incidents ORDER BY created_at DESC,rowid DESC LIMIT 1').fetchone()
+            latest_plan = db.execute('SELECT status FROM plans ORDER BY created_at_wall DESC,rowid DESC LIMIT 1').fetchone()
+        finally:
+            db.close()
+        incident_status = json.loads(incident['incident_json'])['status'] if incident else None
+        plan_status = latest_plan['status'] if latest_plan else None
+        return {'mode': 'LIVE_ADAPTY_SEEDED', 'scenario': 'live_adapty', 'ready': ready,
+            'readiness': readiness, 'app_id': self._manifest()['app'],
+            'app_title': self._manifest().get('app_title'),
+            'environment': self._manifest()['environment'],
+            'source_environment': self._manifest().get('source_environment'),
+            'run_id': self._manifest()['run_id'], 'lumen_url': self.lumen_url,
+            'account_count': source.get('account_count', 0),
+            'active_count': source.get('active_count', 0),
+            'source_observed_at': source.get('source_observed_at'),
+            'provenance': source.get('provenance'),
+            'payment_verification': recovery_live.PAYMENT_VERIFICATION,
+            'provider_evidence_count': 0,
+            'cli_catalog': source.get('cli_catalog'),
+            'catalog': source.get('cli_catalog'),
+            'catalog_provenance': (source.get('cli_catalog') or {}).get('provenance'),
+            'catalog_product_count': (source.get('cli_catalog') or {}).get('product_count'),
+            'catalog_source_hash': (source.get('cli_catalog') or {}).get('source_hash'),
+            'catalog_cli_version': (source.get('cli_catalog') or {}).get('cli_version'),
+            'catalog_observed_at': (source.get('cli_catalog') or {}).get('observed_at'),
+            'seed_revision': self._manifest().get('seed_revision'),
+            'fault_status': fault,
+            'actions_allowed': {'refresh': True,
+                'inject_incident': bool(ready and source.get('active_count', 0) >= 24
+                                        and not fault.get('injected')),
+                'create_plan': incident_status == 'scanned',
+                'approve': plan_status == 'pending_approval',
+                'execute': plan_status == 'approved'}}
+
+    def _live_refresh(self, body):
+        if body not in ({}, {'action': 'refresh'}):
+            raise RecoveryError('Live refresh fields do not match the contract')
+        registry = self._pages(self.provider_url, '/internal/provider/accounts')
+        user_ids = [row['user_id'] for row in registry]
+        result = internal_request(self.key, self.provider_url, 'POST',
+            '/internal/live/refresh', {'user_ids': user_ids}, timeout=60)
+        profiles = self._pages(self.provider_url, '/internal/adapty/profiles')
+        self._notify_live_source_observations(profiles)
+        status = self._live_status()
+        return {'requested': result.get('requested', 0), 'observed': result.get('observed', 0),
+                'active': status['active_count'], 'source_observed_at': status['source_observed_at'],
+                'ready': status['ready']}
+
+    def _live_incident(self, body):
+        if body != {'action': 'inject'}:
+            raise RecoveryError('Live incident fields do not match the contract')
+        registry = self._pages(self.provider_url, '/internal/provider/accounts')
+        user_ids = [row['user_id'] for row in registry]
+        refreshed = internal_request(self.key, self.provider_url, 'POST',
+            '/internal/live/refresh', {'user_ids': user_ids}, timeout=60)
+        if refreshed.get('observed') != len(user_ids):
+            raise RecoveryError('Live source refresh is incomplete', 503)
+        refreshed_profiles = self._pages(self.provider_url, '/internal/adapty/profiles')
+        self._notify_live_source_observations(refreshed_profiles)
+        status = self._live_status()
+        if not status['ready']:
+            raise RecoveryError('Live source scope is not ready', 409)
+        if status['fault_status'].get('injected'):
+            raise RecoveryError('Live fault was already injected', 409)
+        observations = self._observations()
+        now = datetime.now(timezone.utc)
+        candidates = []
+        for user_id in observations['scope_ids']:
+            profile = observations['profiles_by_id'].get(user_id)
+            entitlement = observations['entitlement_by_id'].get(user_id)
+            provider = observations['provider_by_id'].get(user_id)
+            client = observations['clients_by_id'].get(user_id)
+            if (self._live_entitlement_current(profile, entitlement, user_id, now)
+                    and provider and provider.get('identity_status') == 'mapped'
+                    and client and client.get('identity_status') == 'mapped'
+                    and client.get('policy_enabled') and client.get('gate', {}).get('allowed')):
+                candidates.append(user_id)
+        if len(candidates) < 24:
+            raise RecoveryError('Fewer than 24 currently verified healthy accounts are available', 409)
+        selected = sorted(candidates)[:24]
+        signature = uuid4().hex[:10]
+        fault = internal_request(self.key, self.lumen_url, 'POST', '/internal/lumen/live/inject', {
+            'user_ids': selected, 'handler_version': 'lumen-handler-live-v1-'+signature,
+            'config_version': 'premium-export-live-v1-'+signature,
+            'occurred_at': self.wall_now()})
+        gate_status, gate = self._proxy_lumen_gate({'user_id': selected[0]})
+        return {'fault': fault, 'gate': {'status': gate_status, **gate},
+            'incident': {'id': None, 'job_id': None,
+                         'pending': gate_status == 403 and bool(gate.get('event_id'))}}
 
     def _demo(self, body):
         with self._mutation_lock:
@@ -2211,6 +2969,9 @@ class RecoveryService:
                           (event['kind'] == 'feature_access_decided'
                            and event['details'].get('initiator') == 'customer_demo'))
         if not assessed and customer_event:
+            live_denial_only = manifest.get('scenario') == 'live_adapty'
+            should_scan = (not live_denial_only
+                or event['kind'] == 'feature_access_decided' and event['details'].get('decision') == 'deny')
             at = parse_time(event['occurred_at'])
             db = _conn(self.db_path)
             try:
@@ -2223,11 +2984,11 @@ class RecoveryService:
                     (_json({'incident_id': matching['id']}),)).fetchone()
             finally:
                 db.close()
-            if matching:
+            if matching and should_scan:
                 incident_id = matching['id']
                 job_id = pending['id'] if pending else self._start_scan(incident_id)
-            elif (event['details'].get('decision') == 'deny'
-                  or event['details'].get('observation_kind') in ('access_denied', 'purchase_succeeded')):
+            elif (should_scan and (event['details'].get('decision') == 'deny'
+                  or event['details'].get('observation_kind') in ('access_denied', 'purchase_succeeded'))):
                 incident_id, job_id = self._start_incident(event['app_user_id'], event['occurred_at'],
                                                          trigger_event_id=event['event_id'])
         if assessed:
@@ -2387,6 +3148,8 @@ class RecoveryHandler(_legacy.Handler):
                 return self.respond(self.service.sdk.coverage())
             if self.service.role != 'engine':
                 return self.respond({'error':'not found'}, 404)
+            if path == '/api/recovery/live/status':
+                return self.respond(self.service._live_status())
             if path == '/api/recovery/report':
                 return self.respond(self.service._report(_one(query, 'incident_id')))
             if path == '/api/recovery/audit':
@@ -2498,6 +3261,11 @@ class RecoveryHandler(_legacy.Handler):
             return self.respond(self.service._approve(body))
         if path == '/api/recovery/executions':
             return self.respond(self.service._start_execution(body), 202)
+        if path == '/api/recovery/live/refresh':
+            return self.respond(self.service._live_refresh(body))
+        if path == '/api/recovery/live/incident':
+            result = self.service._live_incident(body)
+            return self.respond(result, 202 if result['incident']['pending'] else 200)
         if path == '/api/recovery/demo':
             return self.respond(self.service._demo(body))
         if path in ('/api/recovery/lumen/export','/lumen/export'):
@@ -2544,12 +3312,14 @@ def main(argv=None):
     parser.add_argument('--lumen-url')
     parser.add_argument('--collector-url')
     parser.add_argument('--demo', action='store_true')
+    parser.add_argument('--live-config', type=Path)
     args = parser.parse_args(argv)
     if not 0 <= args.port <= 65535:
         parser.error('--port must be between 0 and 65535')
     service = RecoveryService(args.role, args.port, args.db, args.key_file,
                               provider_url=args.provider_url, lumen_url=args.lumen_url,
-                              collector_url=args.collector_url, demo=args.demo)
+                              collector_url=args.collector_url, demo=args.demo,
+                              live_config=args.live_config)
     server = RecoveryHTTPServer(service)
     service.server = server
     print(json.dumps({'port': server.server_port, 'role': args.role}, separators=(',', ':')),

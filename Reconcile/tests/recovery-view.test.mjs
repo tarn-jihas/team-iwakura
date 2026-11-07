@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { accountRow, escapeHtml, safeReportHtml, statusLabel, statusTone, summaryView, targetLabel } from '../dist/recovery-view.js';
+import { accountRow, escapeHtml, isLiveMode, paymentLabel, safeReportHtml, statusLabel, statusTone, summaryView, targetLabel } from '../dist/recovery-view.js';
 
 test('text rendered into HTML is escaped', () => {
   assert.equal(escapeHtml(`<script a="x">'&`), '&lt;script a=&quot;x&quot;&gt;&#39;&amp;');
@@ -51,4 +51,26 @@ test('structured action targets remain readable without raw JSON', () => {
   const html = safeReportHtml({actions: [{target: {transaction_id: '<txn-7>'}, status: 'verified'}]});
   assert.match(html, /Purchase &lt;txn-7&gt;/);
   assert.doesNotMatch(html, /\[object Object\]/);
+});
+
+test('live Adapty evidence keeps seeded purchase provenance and avoids payment or activation claims', () => {
+  const report = { mode: 'LIVE_ADAPTY_SEEDED', manifest: { app: 'app-uuid', app_title: '<Lumen>' }, summary: { confirmed: 24 }, recovery: { entitlement_verified: 24, access_verified: 24 }, accounts: [{ id: 'acct-1', payment_state: 'paid', status: 'access_verified' }] };
+  assert.equal(isLiveMode(report), true);
+  assert.equal(paymentLabel(report.accounts[0], report), 'Not independently verified');
+  assert.match(summaryView(report), /Entitlement verified/);
+  assert.doesNotMatch(summaryView(report), /Activation verified/);
+  const html = safeReportHtml(report);
+  assert.match(html, /Real Adapty reads · synthetic purchase records/);
+  assert.match(html, /Recovery basis: Adapty entitlement delivery/);
+  assert.match(html, /Payment state was not independently verified/);
+  assert.match(html, /24 entitlements verified/);
+  assert.doesNotMatch(html, /24 activations verified|payment received|recovered revenue/i);
+  assert.match(html, /&lt;Lumen&gt;/);
+  assert.doesNotMatch(html, /app-uuid/);
+});
+
+test('live account rows do not present seeded payment state as verified', () => {
+  const row = accountRow({ id: 'acct-1', status: 'confirmed', eligible: true, payment_state: 'paid' }, false, false, { mode: 'LIVE_ADAPTY_SEEDED' });
+  assert.match(row, /Not independently verified/);
+  assert.doesNotMatch(row, />Paid</);
 });

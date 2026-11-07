@@ -13,12 +13,56 @@ import re
 import stat
 import subprocess
 import sys
+from uuid import UUID
 
 REVISION = '77d39ed807a66bbebcf24fe67c42be4fc9ef4c82'
 SCRIPT_SHA256 = '9477a90e19d8a8e4c85a68dac0ab58bed2a75bb1f8af2aed9ab34cb8a991a156'
 DATASET_SHA256 = '9943d29ded31266d48cf067ff942723ffcbd2d1e64692871b1f0a63a50acb9dd'
 TITLE = 'Lumen - AI Photo Editor (Hackathon)'
 HERE = Path(__file__).resolve().parent
+
+
+def read_cli_catalog(app_id):
+    """Read a paginated catalog through the installed CLI; return only safe fields."""
+    UUID(app_id)
+    version = subprocess.run(['adapty', '--version'], capture_output=True, text=True, timeout=15)
+    if version.returncode:
+        raise ValueError('Adapty CLI is unavailable')
+    products, page, pages, count = [], 1, 1, None
+    while page <= pages:
+        result = subprocess.run(['adapty', 'products', 'list', '--app', app_id,
+            '--page', str(page), '--page-size', '100', '--json'],
+            capture_output=True, text=True, timeout=30)
+        if result.returncode:
+            raise ValueError('Adapty CLI catalog read failed')
+        payload = json.loads(result.stdout)
+        pagination = payload.get('meta', {}).get('pagination', {})
+        reported_pages, reported_count = pagination.get('pages'), pagination.get('count')
+        if (pagination.get('page') != page or type(reported_pages) is not int
+                or not 1 <= reported_pages <= 20 or type(reported_count) is not int
+                or not 0 <= reported_count <= 2000 or not isinstance(payload.get('data'), list)):
+            raise ValueError('Adapty CLI catalog pagination is invalid')
+        if page > 1 and (reported_pages != pages or reported_count != count):
+            raise ValueError('Adapty CLI catalog changed during pagination')
+        pages, count = reported_pages, reported_count
+        for item in payload['data']:
+            if not isinstance(item, dict) or not isinstance(item.get('id'), str):
+                raise ValueError('Adapty CLI product is invalid')
+            vendors = item.get('vendor_products') or {}
+            products.append({key: item.get(key) for key in ('id', 'title', 'period', 'access_level_id')})
+            products[-1]['vendor_products'] = {
+                store: {key: vendor.get(key) for key in ('product_id', 'base_plan_id')}
+                for store, vendor in vendors.items()
+                if store in ('app_store', 'play_store') and isinstance(vendor, dict)}
+        page += 1
+    if len(products) != count or len({item['id'] for item in products}) != count:
+        raise ValueError('Adapty CLI catalog is incomplete or duplicated')
+    products.sort(key=lambda item: item['id'])
+    source_hash = hashlib.sha256(json.dumps(products, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+    return {'app_id': app_id, 'command': 'adapty products list',
+            'cli_version': version.stdout.strip()[:256], 'product_count': count,
+            'observed_at': datetime.now(timezone.utc).isoformat(),
+            'source_hash': source_hash, 'products': products}
 
 
 def private_write(path, value):

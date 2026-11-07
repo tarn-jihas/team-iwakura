@@ -4,12 +4,14 @@
   "type": "module",
   "scripts": {
     "start": "python3 reconcile-mock-first-kit/recovery_demo.py",
+    "start:live": "python3 reconcile-mock-first-kit/recovery_live_demo.py",
     "start:legacy": "python3 reconcile-mock-first-kit/reconcile_mock.py serve --port 8765",
     "seed": "python3 reconcile-mock-first-kit/reconcile_mock.py seed && python3 reconcile-mock-first-kit/paid_access.py seed",
     "check:access": "python3 reconcile-mock-first-kit/paid_access.py check",
     "check:offline": "python3 reconcile-mock-first-kit/hackathon_data.py check",
     "test": "node --test Reconcile/tests/*.test.mjs && python3 -m unittest discover -s reconcile-mock-first-kit/tests -v",
     "test:integration": "python3 -m unittest discover -s reconcile-mock-first-kit/integration -v",
-    "test:acceptance": "python3 -m unittest discover -s reconcile-mock-first-kit/acceptance -v"
+    "test:acceptance": "python3 -m unittest discover -s reconcile-mock-first-kit/acceptance -v",
+    "test:live": "python3 reconcile-mock-first-kit/live_acceptance.py"
   }
 }
