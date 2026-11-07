@@ -36,6 +36,9 @@ reads suffice for known files. No worktrees, external task records or production
 
 ## Verified checkpoint · 2026-11-07
 
+Implementation revision: `12fad97` (parent `933c122`). Final source cleanup only
+removed redundant trailing blank lines after the reviewed/tested checkpoint.
+
 Implemented in `collector_sdk.py`, `paid_access.py`, `lumen_app.py`,
 `access_fixtures.py`, the existing server router and `Reconcile/dist/access*`.
 Cases links both independent flows. Public reports/audit exclude signing keys and
@@ -63,7 +66,10 @@ Generated before/partial/after reports and downloaded sanitized audit are in
 [verification](../PAID_ACCESS_VERIFICATION.md).
 Access runtime reset to the initial default after QA. User's older analytics
 server on8765 and its pending-ingestion state were preserved; restart it to load
-new Python routes. Temporary browser closed and viewport override reset.
+new Python routes. Temporary QA server/browser closed and viewport override reset.
+Staged diff checks passed; runtime and signing keys were excluded from the commit.
 
-Next: inspect final staging, commit intended files, push normally to the authorized
-remote, and verify local/remote revision equality. No deployment is authorized.
+Next user step: restart the older8765 server with `npm start`, open
+`/access.html#lumen` and follow the recovery guide. Required implementation and
+verification are complete. Delivery uses a normal push to the explicitly
+authorized `tarn-jihas/team-iwakura` remote; no deployment or history rewrite.
