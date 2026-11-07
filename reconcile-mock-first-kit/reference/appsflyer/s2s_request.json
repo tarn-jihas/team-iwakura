@@ -1,0 +1,8 @@
+{
+  "appsflyer_id": "1793700000000-0000027",
+  "customer_user_id": "user_00027",
+  "eventName": "af_subscribe",
+  "eventTime": "2026-11-03 12:00:00",
+  "eventCurrency": "USD",
+  "eventValue": "{\"af_content_id\":\"demo.monthly\",\"af_order_id\":\"1000000000000001\",\"af_revenue\":\"6.9900\",\"af_currency\":\"USD\",\"af_quantity\":\"1\"}"
+}

@@ -1,0 +1,10 @@
+{
+  "version": "1.0",
+  "packageName": "com.reconcile.demo",
+  "eventTimeMillis": "1763208000000",
+  "subscriptionNotification": {
+    "version": "1.0",
+    "notificationType": 2,
+    "purchaseToken": "fixture_token_rtdn"
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "api_key": "phc_fixture_only",
+  "uuid": "3a65ddc8-8564-5b19-bd1d-2eb6f2fdb3db",
+  "distinct_id": "user_00027",
+  "event": "subscription_renewed",
+  "timestamp": "2026-11-03T12:00:00.000Z",
+  "properties": {
+    "transaction_id": "1000000000000027",
+    "original_transaction_id": "1000000000000001",
+    "price_usd": 6.99,
+    "currency": "USD",
+    "environment": "Production"
+  }
+}

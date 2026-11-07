@@ -1,0 +1,203 @@
+/* The mock workspace reuses the supplied design system and local typefaces. */
+.mock-app .page { max-width: 1560px; padding-top: 27px; }
+#toast-root { pointer-events: none; }
+.mock-app .page-heading { margin-bottom: 17px; }
+.mock-app .page-heading h1 { font-size: 25px; }
+.mock-badge { display: inline-flex; align-items: center; gap: 6px; font-size: 9px; font-weight: 650; letter-spacing: .045em; background: var(--purple-50); color: var(--purple-800); border: 1px solid #e1dcfb; border-radius: 5px; padding: 5px 7px; white-space: nowrap; }
+.mock-badge .status-dot { background: var(--purple-600); width: 5px; height: 5px; }
+.tick-label { display: inline-flex; gap: 5px; align-items: center; color: var(--text-tertiary); font-size: 11px; }
+.mock-case-meta { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; font-size: 11px; color: var(--text-tertiary); margin: 0 0 21px; }
+.mock-case-meta > span:not(.badge) + span:not(.badge)::before { content: '·'; margin-right: 12px; }
+.local-lock { display: flex; gap: 8px; padding: 15px 5px; border-top: 1px solid var(--border); color: var(--text-tertiary); }
+.local-lock div { display: flex; flex-direction: column; gap: 4px; font-size: 10px; }
+.local-lock strong { font-weight: 500; color: var(--foreground); }
+.currency-cards { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.currency-card { border: 1px solid var(--border); border-radius: 10px; padding: 19px 22px 16px; background: var(--card); }
+.currency-heading { display: flex; justify-content: space-between; align-items: center; font-size: 11px; }
+.currency-heading strong { border: 1px solid var(--border); border-radius: 4px; padding: 3px 5px; font-size: 10px; letter-spacing: .04em; }
+.currency-heading > span { color: var(--text-tertiary); font-size: 9px; letter-spacing: .06em; }
+.currency-gap { margin: 10px 0 18px; font-size: 36px; font-weight: 550; color: var(--foreground); letter-spacing: -.055em; font-variant-numeric: tabular-nums; line-height: 1.25; }
+.currency-gap small { font-size: 13px; font-weight: 400; letter-spacing: 0; color: var(--text-tertiary); margin-left: 8px; }
+.currency-detail { display: flex; gap: 34px; border-top: 1px solid var(--border-subtle); padding-top: 11px; }
+.currency-detail span { display: flex; flex-direction: column; gap: 3px; color: var(--text-tertiary); font-size: 10px; }
+.currency-detail strong { color: var(--foreground); font-weight: 500; font-size: 13px; font-variant-numeric: tabular-nums; }
+.metric-contract { display: flex; align-items: flex-start; gap: 8px; margin: 12px 0 21px; color: var(--text-tertiary); font-size: 10px; line-height: 1.65; }
+.metric-contract svg { flex-shrink: 0; margin-top: 2px; color: var(--purple-600); }
+.metric-contract > span { flex: 1; }
+.metric-contract strong { font-weight: 550; color: var(--foreground); }
+.text-button { color: var(--purple-700); border: 0; background: transparent; padding: 0; font-size: inherit; text-align: left; cursor: pointer; }
+.text-button:hover { text-decoration: underline; }
+.metric-contract .text-button { white-space: nowrap; font-size: 10px; }
+.mock-flow { display: flex; gap: 13px; align-items: center; padding: 13px 18px; margin: 0 0 25px; background: var(--surface-sunken); border: 1px solid var(--border); border-radius: 7px; font-size: 10px; color: var(--text-tertiary); flex-wrap: wrap; }
+.mock-flow > span { display: flex; align-items: center; gap: 5px; }
+.mock-flow i { font-style: normal; opacity: .4; }
+.mock-flow .flow-done { color: var(--purple-700); font-weight: 550; }
+.mock-flow .flow-active { color: var(--warning-text); font-weight: 600; }
+.mock-workspace { display: grid; grid-template-columns: minmax(0, 1fr) 298px; gap: 24px; align-items: start; }
+.mock-work-main { min-width: 0; }
+.mock-tabbar { display: flex; gap: 22px; border-bottom: 1px solid var(--border); margin-bottom: 16px; }
+.mock-tabbar button { display: flex; align-items: center; gap: 6px; padding: 0 0 13px; background: none; border: 0; border-bottom: 2px solid transparent; color: var(--text-tertiary); font-size: 12px; }
+.mock-tabbar button.active { color: var(--foreground); border-bottom-color: var(--purple-600); font-weight: 550; }
+.mock-tabbar button span { background: var(--surface-selected); border-radius: 4px; padding: 1px 5px; font-size: 9px; color: var(--text-tertiary); }
+.mock-finding-toolbar { display: flex; gap: 12px; justify-content: space-between; margin-bottom: 16px; }
+.mock-finding-toolbar .search-field { flex: 1; min-width: 0; max-width: 340px; }
+.mock-finding-toolbar select { background: var(--card); border: 1px solid var(--border); border-radius: 5px; font: inherit; font-size: 11px; padding: 7px 9px; }
+.mock-groups { display: flex; flex-direction: column; gap: 12px; }
+.mock-group { border: 1px solid var(--border); border-radius: 8px; background: var(--card); padding: 16px 17px 0; overflow: hidden; }
+.mock-group-top { display: flex; gap: 10px; align-items: center; }
+.group-icon { width: 33px; height: 33px; display: grid; place-items: center; background: #f6f4ff; color: var(--purple-700); border: 1px solid var(--purple-50); border-radius: 7px; flex-shrink: 0; }
+.group-title { flex: 1; min-width: 0; }
+.group-title h3 { font-size: 12px; font-weight: 600; line-height: 1.45; }
+.group-title > span { color: var(--text-tertiary); font-size: 8px; letter-spacing: .025em; overflow-wrap: anywhere; }
+.mock-group > p { color: var(--text-description); font-size: 11px; line-height: 1.65; margin: 11px 0 12px; }
+.mock-finding-list { border-top: 1px solid var(--border-subtle); }
+.mock-finding { display: flex; gap: 10px; align-items: center; width: 100%; background: none; border: 0; padding: 10px 0; text-align: left; color: var(--foreground); font-size: 11px; }
+.mock-finding + .mock-finding { border-top: 1px solid var(--border-subtle); }
+.mock-finding:hover { background: var(--surface-sunken); }
+.mock-finding > span:first-child { display: flex; flex-direction: column; gap: 3px; flex: 1; min-width: 0; }
+.mock-finding strong { font-family: monospace; font-size: 10px; font-weight: 400; overflow-wrap: anywhere; }
+.mock-finding small { font-size: 9px; color: var(--text-tertiary); }
+.mock-finding .evidence-link { color: var(--purple-700); font-size: 10px; margin-left: 6px; white-space: nowrap; }
+.group-action { background: var(--surface-sunken); border-top: 1px solid var(--border-subtle); margin: 0 -17px; padding: 9px 17px; display: flex; align-items: center; justify-content: space-between; gap: 10px; font-size: 10px; color: var(--text-tertiary); }
+.group-action .btn { min-height: 27px; padding: 2px 9px; font-size: 10px; }
+.group-action code { font-size: 9px; }
+.resolved-note { display: flex; align-items: center; gap: 6px; font-size: 10px; color: var(--success); border-top: 1px solid var(--border-subtle); padding: 11px 0; }
+.mock-group.verified .group-icon, .mock-group.mapped .group-icon, .mock-group.expected .group-icon { background: var(--success-surface); color: var(--success); border-color: var(--success-surface); }
+.mock-review { border: 1px solid var(--border); border-radius: 9px; padding: 17px; background: var(--surface-sunken); }
+.review-panel-title { display: flex; gap: 7px; align-items: center; color: var(--purple-700); }
+.review-panel-title h2 { color: var(--foreground); font-size: 12px; font-weight: 550; flex: 1; }
+.review-panel-title .badge { font-size: 8px; padding: 0 5px; }
+.review-caption { font-size: 9px; color: var(--text-tertiary); margin: 6px 0 17px; }
+.review-answer { border: 1px solid var(--border); border-radius: 6px; padding: 13px; background: var(--card); font-size: 11px; line-height: 1.8; }
+.review-answer > strong { font-size: 11px; font-weight: 550; }
+.review-answer p { margin: 9px 0; color: var(--text-description); }
+.review-answer .text-button { font-size: 10px; }
+.review-proof { display: flex; flex-direction: column; gap: 9px; font-size: 9px; color: var(--text-tertiary); margin: 15px 0 18px; }
+.review-proof span { display: flex; align-items: center; gap: 6px; }
+.review-controls { border-top: 1px solid var(--border); padding-top: 15px; display: flex; flex-direction: column; gap: 8px; }
+.review-controls h3, .review-limit strong { font-size: 11px; font-weight: 550; }
+.review-controls p, .review-limit p { font-size: 10px; line-height: 1.7; color: var(--text-tertiary); }
+.review-controls .btn { font-size: 10px; min-height: 30px; }
+.review-limit { border-top: 1px solid var(--border); margin-top: 17px; padding-top: 13px; }
+.review-limit p { margin-top: 6px; }
+.mock-footer { display: flex; justify-content: space-between; gap: 12px; padding: 20px 30px; margin-top: 25px; font-size: 9px; color: var(--text-tertiary); border-top: 1px solid var(--border-subtle); }
+.mock-case-entry { display: flex; align-items: center; justify-content: space-between; gap: 25px; padding: 25px; }
+.mock-case-entry h2 { font-size: 18px; margin: 8px 0; }
+.mock-case-entry p { display: flex; align-items: center; gap: 7px; font-size: 12px; color: var(--text-tertiary); margin-bottom: 10px; }
+.case-entry-end { display: flex; flex-direction: column; align-items: flex-end; gap: 13px; }
+.case-money { display: flex; gap: 8px; font-size: 12px; }
+.case-money small { color: var(--text-tertiary); }
+.source-path { display: block; overflow-wrap: anywhere; margin: 16px 0; color: var(--text-tertiary); font-size: 11px; }
+.mock-app .inventory-card > p { font-size: 12px; line-height: 1.7; color: var(--text-tertiary); margin-top: 15px; }
+.mock-app .inventory-heading { flex-wrap: wrap; }
+.mock-contract-card { border: 1px solid var(--border); border-radius: 8px; padding: 22px; margin-top: 22px; background: var(--card); }
+.mock-contract-card h2 { font-size: 15px; font-weight: 550; margin-bottom: 13px; }
+.mock-contract-card > p { font-size: 12px; line-height: 1.8; color: var(--text-tertiary); margin-bottom: 12px; }
+.mock-app dl, .mock-drawer dl { display: grid; grid-template-columns: minmax(90px, 180px) minmax(0, 1fr); gap: 9px 15px; font-size: 11px; line-height: 1.7; }
+.mock-app dt, .mock-drawer dt { color: var(--text-tertiary); }
+.mock-app dd, .mock-drawer dd { margin: 0; overflow-wrap: anywhere; font-family: monospace; font-size: 10px; }
+.mock-lab-guide { border: 1px solid var(--border); border-radius: 10px; padding: 26px; background: linear-gradient(110deg, #f7f5ff, #fff); }
+.lab-eyebrow { font-size: 9px; font-weight: 600; letter-spacing: .09em; color: var(--purple-700); }
+.mock-lab-guide h2 { margin: 12px 0; font-size: 22px; font-weight: 550; letter-spacing: -.02em; }
+.mock-lab-guide > p { color: var(--text-description); line-height: 1.8; font-size: 12px; }
+.receipt-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 17px; }
+.section-title { margin-top: 30px; font-size: 16px; }
+.section-title > span { color: var(--text-tertiary); font-size: 12px; font-weight: 400; margin-left: 8px; }
+.section-description { color: var(--text-tertiary); font-size: 12px; margin: 7px 0 18px; }
+.mock-sample-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+.sample-card { padding: 16px; text-align: left; border: 1px solid var(--border); border-radius: 7px; background: var(--card); display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.sample-card:hover { border-color: var(--purple-500); background: var(--purple-25); }
+.sample-card > span { display: flex; align-items: center; gap: 6px; font-size: 10px; text-transform: capitalize; color: var(--purple-700); }
+.sample-card > strong { font-size: 11px; font-weight: 500; overflow-wrap: anywhere; }
+.sample-card > small { font-size: 9px; color: var(--text-tertiary); }
+.mock-operations { min-width: 760px; }
+.mock-operations small, .data-table td > small { display: block; margin-top: 4px; color: var(--text-tertiary); font-size: 9px; }
+.table-note { font-size: 10px !important; line-height: 1.8; color: var(--text-tertiary); margin: 12px 0 0 !important; }
+.receipt-summary { padding: 10px 0 20px; }
+.receipt-summary h2 { font-size: 16px; margin-bottom: 8px; }
+.receipt-summary p { font-size: 11px; color: var(--text-tertiary); }
+.receipt-row { padding: 16px; border: 1px solid var(--border); border-radius: 7px; margin-bottom: 12px; background: var(--card); }
+.receipt-row > div { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+.receipt-row strong { font-size: 10px; }
+.receipt-row > p { font-size: 10px; margin: 12px 0; overflow-wrap: anywhere; }
+.journal { display: flex; flex-direction: column; }
+.journal-row { display: flex; gap: 12px; padding: 13px 0; border-bottom: 1px solid var(--border-subtle); font-size: 11px; }
+.journal-dot { width: 6px; height: 6px; margin: 5px 0; border-radius: 50%; background: var(--purple-500); flex-shrink: 0; }
+.journal-row > div { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+.journal-row strong { font-size: 10px; font-weight: 550; overflow-wrap: anywhere; }
+.journal-row small, .journal-row code { font-size: 9px; color: var(--text-tertiary); overflow-wrap: anywhere; }
+.mock-error { display: flex; justify-content: space-between; gap: 15px; align-items: center; font-size: 12px; line-height: 1.7; border: 1px solid var(--danger-border); background: var(--danger-surface); color: var(--danger-text); padding: 12px; border-radius: 6px; margin-bottom: 20px; }
+.mock-drawer { width: min(860px, 96vw); }
+.mock-drawer .drawer-header h2 { font-size: 21px; overflow-wrap: anywhere; }
+.mock-drawer .drawer-footer { flex-wrap: wrap; flex-shrink: 0; }
+.mock-drawer .drawer-content { background: var(--surface-sunken); }
+.overlay-intro { font-size: 12px; line-height: 1.8; color: var(--text-description); margin-bottom: 20px; }
+.mock-json-block { min-width: 0; margin-bottom: 18px; }
+.mock-json-block h3 { font-size: 11px; font-weight: 550; margin-bottom: 9px; }
+.mock-json-block pre, .preview-plan pre { background: var(--card); border: 1px solid var(--border); border-radius: 7px; padding: 14px; font-size: 10px; line-height: 1.75; overflow: auto; max-height: 580px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.evidence-columns { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+.preview-plan { border: 1px solid var(--border); padding: 16px; border-radius: 8px; margin-bottom: 13px; background: var(--card); }
+.preview-select { display: flex; align-items: flex-start; gap: 10px; cursor: pointer; }
+.preview-select input, .approval-ack input { accent-color: var(--purple-600); width: 16px; height: 16px; flex: 0 0 16px; margin-top: 1px; }
+.preview-select span { display: flex; flex-direction: column; gap: 5px; }
+.preview-select strong { font-size: 12px; font-weight: 550; }
+.preview-select small { color: var(--text-tertiary); font-size: 10px; }
+.preview-delta { display: flex; justify-content: space-between; gap: 10px; font-size: 11px; padding: 13px 0; margin: 13px 0; border-top: 1px solid var(--border-subtle); border-bottom: 1px solid var(--border-subtle); }
+.preview-delta .money { color: var(--purple-700); }
+.preview-plan details { font-size: 11px; margin-top: 13px; }
+.preview-plan summary { cursor: pointer; color: var(--purple-700); }
+.preview-plan pre { margin-top: 10px; }
+.approval-ack { display: flex; align-items: flex-start; gap: 10px; padding: 16px; border: 1px solid #d9d0ff; border-radius: 7px; background: var(--purple-25); font-size: 11px; line-height: 1.8; cursor: pointer; margin: 20px 0 15px; }
+.actor-field { display: flex; flex-direction: column; gap: 7px; font-size: 11px; color: var(--text-description); }
+.actor-field input { background: var(--card); border: 1px solid var(--border); border-radius: 5px; font: inherit; padding: 9px 10px; }
+.mapping-rule { display: flex; align-items: center; gap: 15px; padding: 20px; border: 1px solid var(--border); border-radius: 7px; margin-bottom: 20px; background: var(--card); font-size: 12px; }
+.mock-app button:focus-visible, .mock-app a:focus-visible, .mock-drawer :focus-visible { outline: 2px solid var(--purple-600); outline-offset: 3px; }
+@media (min-width: 1500px) { .mock-app .page { padding-left: 45px; padding-right: 45px; } .mock-workspace { grid-template-columns: minmax(0, 1fr) 320px; } }
+@media (max-width: 1150px) { .mock-workspace { grid-template-columns: minmax(0, 1fr) 265px; gap: 18px; } .mock-app .page { padding-left: 22px; padding-right: 22px; } .currency-card { padding: 16px; } .currency-gap { font-size: 31px; } .mock-review { padding: 14px; } }
+@media (max-width: 950px) { .mock-workspace { grid-template-columns: 1fr; } .mock-review { margin-top: 7px; } .mock-sample-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .review-controls { flex-direction: row; flex-wrap: wrap; } .review-controls h3, .review-controls p { flex-basis: 100%; } .mock-flow { gap: 9px; } }
+@media (max-width: 620px) {
+  .mock-app .page { padding: 20px 15px; }
+  .mock-app .page-heading h1 { font-size: 22px; }
+  .mock-app .topbar { padding: 0 15px; gap: 8px; }
+  .mock-app .topbar .mock-badge { font-size: 7px; padding: 4px; }
+  .tick-label { display: none; }
+  .currency-cards { gap: 9px; }
+  .currency-card { padding: 13px 11px; border-radius: 7px; }
+  .currency-heading > span { font-size: 6px; }
+  .currency-gap { font-size: 28px; margin: 12px 0; }
+  .currency-gap small { font-size: 10px; margin-left: 5px; }
+  .currency-detail { flex-direction: column; gap: 9px; }
+  .currency-detail span { font-size: 8px; }
+  .currency-detail strong { font-size: 12px; }
+  .mock-case-meta { gap: 8px; line-height: 1.6; font-size: 10px; }
+  .metric-contract { flex-wrap: wrap; }
+  .metric-contract .text-button { margin-left: 21px; }
+  .mock-flow { font-size: 9px; padding: 12px; gap: 8px; }
+  .mock-tabbar { gap: 17px; }
+  .mock-tabbar button { font-size: 11px; }
+  .mock-finding-toolbar { gap: 7px; }
+  .mock-finding-toolbar select { max-width: 115px; font-size: 10px; }
+  .mock-finding-toolbar input { font-size: 10px; width: 100%; }
+  .mock-group { padding: 13px 12px 0; }
+  .mock-group-top { flex-wrap: wrap; gap: 8px; }
+  .mock-group-top .badge { font-size: 9px; margin-left: 41px; margin-top: -4px; }
+  .group-action { margin: 0 -12px; padding: 9px 12px; }
+  .mock-finding { flex-wrap: wrap; }
+  .mock-finding > span:first-child { flex-basis: 65%; }
+  .mock-finding .evidence-link { margin-left: 0; }
+  .mock-footer { flex-direction: column; padding: 20px 15px; }
+  .mock-case-entry { flex-direction: column; align-items: flex-start; padding: 19px; }
+  .case-entry-end { align-items: flex-start; }
+  .mock-sample-grid { grid-template-columns: 1fr; }
+  .mock-contract-card { padding: 17px; }
+  .mock-app dl, .mock-drawer dl { grid-template-columns: 1fr; gap: 3px; }
+  .mock-app dd, .mock-drawer dd { margin-bottom: 8px; }
+  .mock-lab-guide { padding: 20px; }
+  .mock-lab-guide h2 { font-size: 20px; }
+  .mock-drawer { width: 100vw; }
+  .evidence-columns { grid-template-columns: 1fr; }
+  .preview-delta { flex-direction: column; }
+  .mapping-rule { flex-wrap: wrap; font-size: 11px; }
+  .mock-error { flex-direction: column; align-items: flex-start; }
+  .mock-drawer .drawer-footer .btn { font-size: 10px; }
+}

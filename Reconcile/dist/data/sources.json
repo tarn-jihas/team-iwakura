@@ -1,0 +1,12 @@
+{
+  "checked_on": "2026-11-06",
+  "seed": "https://github.com/kpotehin/adapty-seed-data-hack/tree/77d39ed807a66bbebcf24fe67c42be4fc9ef4c82",
+  "cli_package": "https://registry.npmjs.org/adapty/0.18.0",
+  "google_orders": "https://developers.google.com/android-publisher/api-ref/rest/v3/orders",
+  "google_earnings_csv": "https://support.google.com/googleplay/android-developer/answer/6135870?hl=en",
+  "adapty_webhook": "https://adapty.io/docs/webhook-event-types-and-fields",
+  "adapty_mixpanel_mapping": "https://adapty.io/docs/mixpanel",
+  "mixpanel_export_example": "https://docs.mixpanel.com/reference/raw-event-export",
+  "mixpanel_deduplication": "https://docs.mixpanel.com/reference/event-deduplication",
+  "note": "Public docs define formats; all provider-format payloads in this pack are constructed synthetic projections, not copied customer data."
+}

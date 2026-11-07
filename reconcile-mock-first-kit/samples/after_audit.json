@@ -1,0 +1,355 @@
+{
+  "run": "mock-run-20261107",
+  "mode": "FULL_MOCK",
+  "manifest": {
+    "run_id": "mock-run-20261107",
+    "seed": 20261107,
+    "mode": "FULL_MOCK",
+    "source_provenance": "synthetic",
+    "clock_utc_epoch_seconds": 1794042000,
+    "currency_aggregation": "per_currency_only",
+    "environment": "Production",
+    "app": "mock-lumen",
+    "project": "mock-mixpanel-eu",
+    "region": "EU",
+    "project_timezone": "America/New_York",
+    "complete_account_registry": true,
+    "source_amount_authority": "synthetic Adapty-shaped event log; NOT GET /profile/"
+  },
+  "journal": [
+    {
+      "type": "SEEDED",
+      "run_id": "mock-run-20261107",
+      "clock": 0,
+      "source_events": 9,
+      "raw_mp_events": 8
+    },
+    {
+      "type": "MAPPING_APPROVED",
+      "actor": "demo-operator",
+      "event": "premium_paid_v2",
+      "from": null,
+      "to": "purchase",
+      "tick": 0
+    },
+    {
+      "type": "APPROVAL",
+      "cls": "DUPLICATE_IN_MIXPANEL",
+      "actor": "demo-operator",
+      "tick": 0,
+      "hash": "6d4008338493321af420e72a07dcbcffdfd73edbc0eba603126038a54ce3a7cf"
+    },
+    {
+      "type": "APPROVAL",
+      "cls": "MISSING_IN_MIXPANEL",
+      "actor": "demo-operator",
+      "tick": 0,
+      "hash": "68cc6ecb9ce03ccc663895a7811d329653c95c65de43d21f0ff023141337ea2b"
+    },
+    {
+      "type": "APPROVAL",
+      "cls": "PRICE_MISMATCH",
+      "actor": "demo-operator",
+      "tick": 0,
+      "hash": "948b04efab5e74b0c256988a2bdd642f281189aaeb41da2510e424de95616d1e"
+    },
+    {
+      "type": "WRITE_ACCEPTED_MOCK",
+      "cls": "DUPLICATE_IN_MIXPANEL",
+      "finding": "DUPLICATE_IN_MIXPANEL|txn_duplicate|purchase|u00003|Production|USD|mock-run-20261107|mock-lumen",
+      "action_id": "d699f8aa-36ce-597d-8956-952d8b58dd2f",
+      "tick": 0,
+      "destination_visible_at": 1,
+      "payload": {
+        "event": "reconcile_correction",
+        "properties": {
+          "distinct_id": "u00003",
+          "time": 1794043000,
+          "$insert_id": "8ae48e94-2a2a-5f56-94c5-c1d77f20f6f7",
+          "transaction_id": "txn_duplicate",
+          "original_transaction_id": "txn_duplicate",
+          "currency": "USD",
+          "price_local": "-12.99",
+          "environment": "Production",
+          "store": "play_store",
+          "reconcile_run_id": "mock-run-20261107",
+          "corrects_class": "DUPLICATE_IN_MIXPANEL",
+          "corrects_event_class": "purchase",
+          "reason": "synthetic approved correction"
+        }
+      }
+    },
+    {
+      "type": "WRITE_ACCEPTED_MOCK",
+      "cls": "MISSING_IN_MIXPANEL",
+      "finding": "MISSING_IN_MIXPANEL|txn_missing_purchase|purchase|u00001|Production|USD|mock-run-20261107|mock-lumen",
+      "action_id": "e01f640a-5539-5806-85fa-2b9a528f93f6",
+      "tick": 0,
+      "destination_visible_at": 1,
+      "payload": {
+        "event": "subscription_started",
+        "properties": {
+          "distinct_id": "u00001",
+          "time": 1794043000,
+          "$insert_id": "5fe8c34e-059c-5cdd-86ae-d075f4bb56eb",
+          "transaction_id": "txn_missing_purchase",
+          "original_transaction_id": "txn_missing_purchase",
+          "currency": "USD",
+          "price_local": "9.99",
+          "environment": "Production",
+          "store": "play_store",
+          "reconcile_run_id": "mock-run-20261107"
+        }
+      }
+    },
+    {
+      "type": "WRITE_ACCEPTED_MOCK",
+      "cls": "MISSING_IN_MIXPANEL",
+      "finding": "MISSING_IN_MIXPANEL|txn_missing_refund|refund|u00002|Production|USD|mock-run-20261107|mock-lumen",
+      "action_id": "99c9f717-580c-5050-852c-8be3322e5a5b",
+      "tick": 0,
+      "destination_visible_at": 1,
+      "payload": {
+        "event": "subscription_refunded",
+        "properties": {
+          "distinct_id": "u00002",
+          "time": 1794043000,
+          "$insert_id": "e21d71fb-7e78-54b8-8af1-836c936bc212",
+          "transaction_id": "txn_missing_refund",
+          "original_transaction_id": "txn_missing_refund",
+          "currency": "USD",
+          "price_local": "-6.99",
+          "environment": "Production",
+          "store": "play_store",
+          "reconcile_run_id": "mock-run-20261107"
+        }
+      }
+    },
+    {
+      "type": "WRITE_ACCEPTED_MOCK",
+      "cls": "PRICE_MISMATCH",
+      "finding": "PRICE_MISMATCH|txn_price|purchase|u00004|Production|EUR|mock-run-20261107|mock-lumen",
+      "action_id": "b145e961-806f-5c12-93f0-8cd0d887b639",
+      "tick": 0,
+      "destination_visible_at": 1,
+      "payload": {
+        "event": "reconcile_correction",
+        "properties": {
+          "distinct_id": "u00004",
+          "time": 1794043000,
+          "$insert_id": "405f1a10-d747-5232-8314-c32b28778d74",
+          "transaction_id": "txn_price",
+          "original_transaction_id": "txn_price",
+          "currency": "EUR",
+          "price_local": "-989.01",
+          "environment": "Production",
+          "store": "play_store",
+          "reconcile_run_id": "mock-run-20261107",
+          "corrects_class": "PRICE_MISMATCH",
+          "corrects_event_class": "purchase",
+          "reason": "synthetic approved correction"
+        }
+      }
+    },
+    {
+      "type": "MOCK_CLOCK_ADVANCED",
+      "tick": 1
+    }
+  ],
+  "actions": {
+    "d699f8aa-36ce-597d-8956-952d8b58dd2f": {
+      "group": "DUPLICATE_IN_MIXPANEL",
+      "finding": "DUPLICATE_IN_MIXPANEL|txn_duplicate|purchase|u00003|Production|USD|mock-run-20261107|mock-lumen",
+      "txn": "txn_duplicate",
+      "user": "u00003",
+      "event_class": "purchase",
+      "currency": "USD",
+      "environment": "Production",
+      "delta": "12.99",
+      "evidence_hash": "9383f03885220447c0df976268ea9861c7b9277fc8eeb9bc036f3bd895b2a1d7",
+      "payload_hash": "72ae94c7699a1bef604987aa7074529beda3f7517b1bca0411ed738466aa2d34",
+      "insert_id": "8ae48e94-2a2a-5f56-94c5-c1d77f20f6f7",
+      "accepted_at_tick": 0,
+      "visible_at_tick": 1,
+      "approval_actor": "demo-operator"
+    },
+    "e01f640a-5539-5806-85fa-2b9a528f93f6": {
+      "group": "MISSING_IN_MIXPANEL",
+      "finding": "MISSING_IN_MIXPANEL|txn_missing_purchase|purchase|u00001|Production|USD|mock-run-20261107|mock-lumen",
+      "txn": "txn_missing_purchase",
+      "user": "u00001",
+      "event_class": "purchase",
+      "currency": "USD",
+      "environment": "Production",
+      "delta": "-9.99",
+      "evidence_hash": "1bcd36f753e940a9b11ad33c56ff750ca4876c4047bec301123094f07b1b0589",
+      "payload_hash": "0db2bcd2a8fe155c526ecf2cd7dec3a5f6f523a6ffea1da6254a10e7227a7699",
+      "insert_id": "5fe8c34e-059c-5cdd-86ae-d075f4bb56eb",
+      "accepted_at_tick": 0,
+      "visible_at_tick": 1,
+      "approval_actor": "demo-operator"
+    },
+    "99c9f717-580c-5050-852c-8be3322e5a5b": {
+      "group": "MISSING_IN_MIXPANEL",
+      "finding": "MISSING_IN_MIXPANEL|txn_missing_refund|refund|u00002|Production|USD|mock-run-20261107|mock-lumen",
+      "txn": "txn_missing_refund",
+      "user": "u00002",
+      "event_class": "refund",
+      "currency": "USD",
+      "environment": "Production",
+      "delta": "6.99",
+      "evidence_hash": "1bcd36f753e940a9b11ad33c56ff750ca4876c4047bec301123094f07b1b0589",
+      "payload_hash": "4112e8720ae727bf8643b4bc346c0cbbee312c783cc4bb15ddcaf51e4b620862",
+      "insert_id": "e21d71fb-7e78-54b8-8af1-836c936bc212",
+      "accepted_at_tick": 0,
+      "visible_at_tick": 1,
+      "approval_actor": "demo-operator"
+    },
+    "b145e961-806f-5c12-93f0-8cd0d887b639": {
+      "group": "PRICE_MISMATCH",
+      "finding": "PRICE_MISMATCH|txn_price|purchase|u00004|Production|EUR|mock-run-20261107|mock-lumen",
+      "txn": "txn_price",
+      "user": "u00004",
+      "event_class": "purchase",
+      "currency": "EUR",
+      "environment": "Production",
+      "delta": "989.01",
+      "evidence_hash": "fed041d2c66e9e9e80b4e2e58c4710b162305d5b0ae0d027b8d52fbd7ee51bce",
+      "payload_hash": "b8ffa241893cf38870a29d2629c3460b6e977838e425e8cf0ae6863069b9f890",
+      "insert_id": "405f1a10-d747-5232-8314-c32b28778d74",
+      "accepted_at_tick": 0,
+      "visible_at_tick": 1,
+      "approval_actor": "demo-operator"
+    }
+  },
+  "approvals": {
+    "DUPLICATE_IN_MIXPANEL": {
+      "actor": "demo-operator",
+      "group_hash": "6d4008338493321af420e72a07dcbcffdfd73edbc0eba603126038a54ce3a7cf",
+      "evidence_hash": "9383f03885220447c0df976268ea9861c7b9277fc8eeb9bc036f3bd895b2a1d7",
+      "approved_at_tick": 0,
+      "findings": [
+        "DUPLICATE_IN_MIXPANEL|txn_duplicate|purchase|u00003|Production|USD|mock-run-20261107|mock-lumen"
+      ]
+    },
+    "MISSING_IN_MIXPANEL": {
+      "actor": "demo-operator",
+      "group_hash": "68cc6ecb9ce03ccc663895a7811d329653c95c65de43d21f0ff023141337ea2b",
+      "evidence_hash": "1bcd36f753e940a9b11ad33c56ff750ca4876c4047bec301123094f07b1b0589",
+      "approved_at_tick": 0,
+      "findings": [
+        "MISSING_IN_MIXPANEL|txn_missing_purchase|purchase|u00001|Production|USD|mock-run-20261107|mock-lumen",
+        "MISSING_IN_MIXPANEL|txn_missing_refund|refund|u00002|Production|USD|mock-run-20261107|mock-lumen"
+      ]
+    },
+    "PRICE_MISMATCH": {
+      "actor": "demo-operator",
+      "group_hash": "948b04efab5e74b0c256988a2bdd642f281189aaeb41da2510e424de95616d1e",
+      "evidence_hash": "fed041d2c66e9e9e80b4e2e58c4710b162305d5b0ae0d027b8d52fbd7ee51bce",
+      "approved_at_tick": 0,
+      "findings": [
+        "PRICE_MISMATCH|txn_price|purchase|u00004|Production|EUR|mock-run-20261107|mock-lumen"
+      ]
+    }
+  },
+  "verification": {
+    "status": "verified",
+    "tick": 1,
+    "actions": [
+      {
+        "action_id": "99c9f717-580c-5050-852c-8be3322e5a5b",
+        "group": "MISSING_IN_MIXPANEL",
+        "finding": "MISSING_IN_MIXPANEL|txn_missing_refund|refund|u00002|Production|USD|mock-run-20261107|mock-lumen",
+        "status": "verified",
+        "insert_id": "e21d71fb-7e78-54b8-8af1-836c936bc212",
+        "readback": {
+          "event": "subscription_refunded",
+          "properties": {
+            "distinct_id": "u00002",
+            "time": 1794043000,
+            "$insert_id": "e21d71fb-7e78-54b8-8af1-836c936bc212",
+            "transaction_id": "txn_missing_refund",
+            "original_transaction_id": "txn_missing_refund",
+            "currency": "USD",
+            "price_local": "-6.99",
+            "environment": "Production",
+            "store": "play_store",
+            "reconcile_run_id": "mock-run-20261107"
+          }
+        }
+      },
+      {
+        "action_id": "b145e961-806f-5c12-93f0-8cd0d887b639",
+        "group": "PRICE_MISMATCH",
+        "finding": "PRICE_MISMATCH|txn_price|purchase|u00004|Production|EUR|mock-run-20261107|mock-lumen",
+        "status": "verified",
+        "insert_id": "405f1a10-d747-5232-8314-c32b28778d74",
+        "readback": {
+          "event": "reconcile_correction",
+          "properties": {
+            "distinct_id": "u00004",
+            "time": 1794043000,
+            "$insert_id": "405f1a10-d747-5232-8314-c32b28778d74",
+            "transaction_id": "txn_price",
+            "original_transaction_id": "txn_price",
+            "currency": "EUR",
+            "price_local": "-989.01",
+            "environment": "Production",
+            "store": "play_store",
+            "reconcile_run_id": "mock-run-20261107",
+            "corrects_class": "PRICE_MISMATCH",
+            "corrects_event_class": "purchase",
+            "reason": "synthetic approved correction"
+          }
+        }
+      },
+      {
+        "action_id": "d699f8aa-36ce-597d-8956-952d8b58dd2f",
+        "group": "DUPLICATE_IN_MIXPANEL",
+        "finding": "DUPLICATE_IN_MIXPANEL|txn_duplicate|purchase|u00003|Production|USD|mock-run-20261107|mock-lumen",
+        "status": "verified",
+        "insert_id": "8ae48e94-2a2a-5f56-94c5-c1d77f20f6f7",
+        "readback": {
+          "event": "reconcile_correction",
+          "properties": {
+            "distinct_id": "u00003",
+            "time": 1794043000,
+            "$insert_id": "8ae48e94-2a2a-5f56-94c5-c1d77f20f6f7",
+            "transaction_id": "txn_duplicate",
+            "original_transaction_id": "txn_duplicate",
+            "currency": "USD",
+            "price_local": "-12.99",
+            "environment": "Production",
+            "store": "play_store",
+            "reconcile_run_id": "mock-run-20261107",
+            "corrects_class": "DUPLICATE_IN_MIXPANEL",
+            "corrects_event_class": "purchase",
+            "reason": "synthetic approved correction"
+          }
+        }
+      },
+      {
+        "action_id": "e01f640a-5539-5806-85fa-2b9a528f93f6",
+        "group": "MISSING_IN_MIXPANEL",
+        "finding": "MISSING_IN_MIXPANEL|txn_missing_purchase|purchase|u00001|Production|USD|mock-run-20261107|mock-lumen",
+        "status": "verified",
+        "insert_id": "5fe8c34e-059c-5cdd-86ae-d075f4bb56eb",
+        "readback": {
+          "event": "subscription_started",
+          "properties": {
+            "distinct_id": "u00001",
+            "time": 1794043000,
+            "$insert_id": "5fe8c34e-059c-5cdd-86ae-d075f4bb56eb",
+            "transaction_id": "txn_missing_purchase",
+            "original_transaction_id": "txn_missing_purchase",
+            "currency": "USD",
+            "price_local": "9.99",
+            "environment": "Production",
+            "store": "play_store",
+            "reconcile_run_id": "mock-run-20261107"
+          }
+        }
+      }
+    ]
+  }
+}

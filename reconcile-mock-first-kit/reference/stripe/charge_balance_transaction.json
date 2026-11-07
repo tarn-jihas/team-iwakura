@@ -1,0 +1,13 @@
+{
+  "id": "txn_mock_charge_001",
+  "object": "balance_transaction",
+  "source": "ch_mock_001",
+  "type": "charge",
+  "amount": 1234,
+  "currency": "usd",
+  "exchange_rate": 1.234,
+  "fee": 66,
+  "net": 1168,
+  "created": 1793707200,
+  "status": "available"
+}

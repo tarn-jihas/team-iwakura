@@ -1,0 +1,10 @@
+{
+  "name": "reconcile-mock-first",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "python3 reconcile-mock-first-kit/reconcile_mock.py serve --port 8765",
+    "seed": "python3 reconcile-mock-first-kit/reconcile_mock.py seed",
+    "test": "node --test Reconcile/tests/*.test.mjs && python3 -m unittest discover -s reconcile-mock-first-kit/tests -v"
+  }
+}

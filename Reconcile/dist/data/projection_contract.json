@@ -1,0 +1,30 @@
+{
+  "classification": "SYNTHETIC SCHEMA-BASED FIXTURES; NO ACTUAL ADAPTY OR MIXPANEL RESPONSE WAS CAPTURED",
+  "source_commit": "77d39ed807a66bbebcf24fe67c42be4fc9ef4c82",
+  "source_user": "u00598",
+  "amount_basis": "Customer charge before fees/tax adjustments, minus the one simulated full refund",
+  "full_refund_assumption": "CSV provides refunded_at but no refund amount/type; this fixture chooses one full USD6.99 refund.",
+  "adapty_json_scope": "Selected documented webhook fields only. This is not a complete webhook schema fixture; e.g. proceeds_usd is intentionally omitted because the source has no commission basis.",
+  "refund_amount_convention": "Positive magnitude in projected price_* fields; internal signed amount comes from event_type. Public docs reviewed did not explicitly fix the raw refund sign. Validate the adapter against a captured event before asserting real integration parity.",
+  "mixpanel_raw_export_time_in_ms": false,
+  "mixpanel_identity_assumption": "No mixpanel_user_id override; distinct_id uses synthetic CUID fallback.",
+  "mixpanel_insert_id_assumption": "The mock assigns the projected event UUID to $insert_id. This is an explicit mapping, not observed proof of exact equality in a real integration.",
+  "mixed_identity_fields": "profile IDs and event IDs are fake. Google-format IDs are assigned by explicit fixture mapping and do not equal an actual seeder run.",
+  "time_basis": "Original unshifted offline dates; no live replay time shift",
+  "coverage": {
+    "offline_rows": 9,
+    "trial_rows_excluded_from_cash": 1,
+    "charges": 8,
+    "refunds_simulated": 1
+  },
+  "omitted_unknowns": [
+    "real receipts/signatures",
+    "provider fees",
+    "tax",
+    "settlement/payout",
+    "real marketing attribution",
+    "actual event-delivery status",
+    "historical flow/A-B attribution"
+  ],
+  "inference_boundary": "The oracle and mapping annotations are test controls, never model evidence. Double-tracking is the injected scenario, while duplicate economic events are the observable finding; producer root cause remains a hypothesis without producer logs."
+}

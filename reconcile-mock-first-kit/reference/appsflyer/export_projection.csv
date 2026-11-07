@@ -1,0 +1,2 @@
+Event Time,Event Name,Event Value,Event Revenue,Event Revenue Currency,Event Revenue USD,Event Source,AppsFlyer ID,Customer User ID
+2026-11-03 12:00:00,af_subscribe,"{""af_content_id"":""demo.monthly"",""af_order_id"":""1000000000000001"",""af_revenue"":""6.9900"",""af_currency"":""USD"",""af_quantity"":""1""}",6.99,USD,6.99,S2S,1793700000000-0000027,user_00027

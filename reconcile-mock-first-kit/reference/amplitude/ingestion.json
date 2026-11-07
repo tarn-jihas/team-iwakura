@@ -1,0 +1,20 @@
+{
+  "api_key": "fixture_only",
+  "events": [
+    {
+      "user_id": "user_00027",
+      "device_id": "device_00027",
+      "event_type": "subscription_refunded",
+      "time": 1793793600000,
+      "insert_id": "e6200e51-87f1-5894-a15e-549f5f685c79",
+      "revenue": -6.99,
+      "currency": "USD",
+      "productId": "demo.monthly",
+      "revenueType": "refund",
+      "event_properties": {
+        "transaction_id": "1000000000000027",
+        "environment": "Production"
+      }
+    }
+  ]
+}

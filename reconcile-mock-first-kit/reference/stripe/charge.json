@@ -1,0 +1,17 @@
+{
+  "id": "ch_mock_001",
+  "object": "charge",
+  "amount": 1000,
+  "amount_captured": 1000,
+  "amount_refunded": 200,
+  "currency": "eur",
+  "created": 1793707200,
+  "paid": true,
+  "captured": true,
+  "refunded": false,
+  "status": "succeeded",
+  "livemode": false,
+  "customer": "cus_mock_027",
+  "payment_intent": "pi_mock_001",
+  "balance_transaction": "txn_mock_charge_001"
+}

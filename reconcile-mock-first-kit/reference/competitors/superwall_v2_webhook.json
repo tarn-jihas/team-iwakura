@@ -1,0 +1,37 @@
+{
+  "id": "evt_019a4a20000070008000000000000027",
+  "api_version": "2026-09-22",
+  "type": "renewal",
+  "occurred_at": 1793707200000,
+  "project_id": "mock_project",
+  "app_user_id": "user_00027",
+  "ordering_key": "mock_project/user_00027",
+  "event_data": {
+    "id": "mock_store_event_027:renewal",
+    "name": "renewal",
+    "application_id": "mock_app",
+    "store": "APP_STORE",
+    "environment": "PRODUCTION",
+    "transaction_id": "1000000000000027",
+    "original_transaction_id": "1000000000000001",
+    "product_id": "demo.monthly",
+    "price": 10.0,
+    "proceeds": 7.0,
+    "price_in_purchased_currency": 10.0,
+    "currency_code": "USD",
+    "exchange_rate": 1.0,
+    "commission_percentage": 0.3,
+    "tax_percentage": 0.0,
+    "purchased_at": 1793707200000
+  },
+  "subscription": {
+    "subscription_id": "1000000000000001",
+    "transaction_id": "1000000000000027",
+    "sequence": 1793707200000040,
+    "store": "app-store",
+    "environment": "live",
+    "is_active": true,
+    "amount_micros": 10000000,
+    "currency": "USD"
+  }
+}

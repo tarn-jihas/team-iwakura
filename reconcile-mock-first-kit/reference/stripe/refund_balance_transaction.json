@@ -1,0 +1,13 @@
+{
+  "id": "txn_mock_refund_001",
+  "object": "balance_transaction",
+  "source": "re_mock_001",
+  "type": "refund",
+  "amount": -240,
+  "currency": "usd",
+  "exchange_rate": 1.2,
+  "fee": 0,
+  "net": -240,
+  "created": 1793793600,
+  "status": "available"
+}

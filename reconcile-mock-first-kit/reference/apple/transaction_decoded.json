@@ -1,0 +1,11 @@
+{
+  "transactionId": "2000000000000101",
+  "originalTransactionId": "2000000000000100",
+  "appAccountToken": "11111111-1111-4111-8111-111111111111",
+  "bundleId": "com.reconcile.demo",
+  "productId": "premium.monthly",
+  "environment": "Sandbox",
+  "purchaseDate": 1761955200000,
+  "price": 9990,
+  "currency": "USD"
+}

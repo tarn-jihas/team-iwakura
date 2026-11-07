@@ -1,0 +1,15 @@
+{
+  "kind": "androidpublisher#subscriptionPurchaseV2",
+  "subscriptionState": "SUBSCRIPTION_STATE_ACTIVE",
+  "testPurchase": {},
+  "lineItems": [
+    {
+      "productId": "premium.monthly",
+      "latestSuccessfulOrderId": "GPA.1000-2000-3000-13001..0",
+      "expiryTime": "2025-12-15T12:00:00Z",
+      "autoRenewingPlan": {
+        "autoRenewEnabled": true
+      }
+    }
+  ]
+}

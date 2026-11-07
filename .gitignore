@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.DS_Store
+reconcile-mock-first-kit/runtime/state.json
+reconcile-mock-first-kit/runtime/*.tmp
+Reconcile/.openai/
+.artifacts/

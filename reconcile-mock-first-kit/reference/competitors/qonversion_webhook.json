@@ -1,0 +1,30 @@
+{
+  "id": "9d9014c7-c9a3-58df-8f58-5314bde3b077",
+  "event_name": "trial_converted",
+  "user_id": "qon_mock_027",
+  "custom_user_id": "user_00027",
+  "identity_id": "user_00027",
+  "time": 1793707200,
+  "created_at": 1793707201,
+  "product_id": "demo.monthly",
+  "period_type": "regular",
+  "revenue": {
+    "value": 10.0,
+    "value_usd": 10.0,
+    "currency": "USD",
+    "is_proceed": 0,
+    "proceeds_rate": 70
+  },
+  "price": {
+    "value": 10.0,
+    "value_usd": 10.0,
+    "currency": "USD"
+  },
+  "transaction": {
+    "transaction_id": "1000000000000027",
+    "original_transaction_id": "1000000000000001",
+    "transaction_date": 1793707200
+  },
+  "environment": "production",
+  "platform": "iOS"
+}

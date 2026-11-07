@@ -1,0 +1,259 @@
+{
+  "run": "mock-run-20261107",
+  "mode": "FULL_MOCK",
+  "manifest": {
+    "run_id": "mock-run-20261107",
+    "seed": 20261107,
+    "mode": "FULL_MOCK",
+    "source_provenance": "synthetic",
+    "clock_utc_epoch_seconds": 1794042000,
+    "currency_aggregation": "per_currency_only",
+    "environment": "Production",
+    "app": "mock-lumen",
+    "project": "mock-mixpanel-eu",
+    "region": "EU",
+    "project_timezone": "America/New_York",
+    "complete_account_registry": true,
+    "source_amount_authority": "synthetic Adapty-shaped event log; NOT GET /profile/"
+  },
+  "clock": 0,
+  "source_provenance": "synthetic",
+  "destination_provenance": "synthetic/stateful",
+  "source_totals": {
+    "USD": "29.97",
+    "EUR": "31.97"
+  },
+  "destination_effective_totals": {
+    "USD": "51.94",
+    "EUR": "1020.98"
+  },
+  "gap": {
+    "EUR": "989.01",
+    "USD": "21.97"
+  },
+  "groups": [
+    {
+      "cls": "DUPLICATE_IN_MIXPANEL",
+      "action": "post_correction",
+      "writes": true,
+      "confidence": "deterministic/mock",
+      "risk": "requires preview and approval",
+      "why": "1 synthetic finding(s); deterministic rule",
+      "delta": {
+        "USD": "12.99"
+      },
+      "users": [
+        "u00003"
+      ],
+      "findings": [
+        {
+          "id": "DUPLICATE_IN_MIXPANEL|txn_duplicate|purchase|u00003|Production|USD|mock-run-20261107|mock-lumen",
+          "cls": "DUPLICATE_IN_MIXPANEL",
+          "txn": "txn_duplicate",
+          "user": "u00003",
+          "event_class": "purchase",
+          "currency": "USD",
+          "environment": "Production",
+          "delta": "12.99",
+          "evidence": "2 effective destination events, source=12.99, destination+corrections=25.98",
+          "note": "Synthetic observations; no provider calls",
+          "provenance": "FULL_MOCK"
+        }
+      ],
+      "evidence_hash": "9383f03885220447c0df976268ea9861c7b9277fc8eeb9bc036f3bd895b2a1d7",
+      "group_hash": "6d4008338493321af420e72a07dcbcffdfd73edbc0eba603126038a54ce3a7cf",
+      "state": "open"
+    },
+    {
+      "cls": "EXTRA_IN_MIXPANEL",
+      "action": "investigate",
+      "writes": false,
+      "confidence": "deterministic/mock",
+      "risk": "none",
+      "why": "1 synthetic finding(s); deterministic rule",
+      "delta": {
+        "USD": "11.98"
+      },
+      "users": [
+        "u00009"
+      ],
+      "findings": [
+        {
+          "id": "EXTRA_IN_MIXPANEL|txn_ghost|purchase|u00009|Production|USD|mock-run-20261107|mock-lumen|bd19f642-c897-5113-845f-a667b4556c91",
+          "cls": "EXTRA_IN_MIXPANEL",
+          "txn": "txn_ghost",
+          "user": "u00009",
+          "event_class": "purchase",
+          "currency": "USD",
+          "environment": "Production",
+          "delta": "11.98",
+          "evidence": "Destination event without source transaction in known production population",
+          "note": "Synthetic observations; no provider calls",
+          "provenance": "FULL_MOCK"
+        }
+      ],
+      "evidence_hash": "3f0395cf9399644bb42d1e1a00ef5fd6e2ba70e41ccaa0110110e13883bcd3b0",
+      "group_hash": "522f139627341b9c96a40c2f49c6315d27b04480a5065c70aa8691614fe72ffa",
+      "state": "manual"
+    },
+    {
+      "cls": "MISSING_IN_MIXPANEL",
+      "action": "backfill_mixpanel",
+      "writes": true,
+      "confidence": "deterministic/mock",
+      "risk": "requires preview and approval",
+      "why": "2 synthetic finding(s); deterministic rule",
+      "delta": {
+        "USD": "-3.00"
+      },
+      "users": [
+        "u00001",
+        "u00002"
+      ],
+      "findings": [
+        {
+          "id": "MISSING_IN_MIXPANEL|txn_missing_purchase|purchase|u00001|Production|USD|mock-run-20261107|mock-lumen",
+          "cls": "MISSING_IN_MIXPANEL",
+          "txn": "txn_missing_purchase",
+          "user": "u00001",
+          "event_class": "purchase",
+          "currency": "USD",
+          "environment": "Production",
+          "delta": "-9.99",
+          "evidence": "Source has event; destination lacks matching class in declared scope",
+          "note": "Synthetic observations; no provider calls",
+          "provenance": "FULL_MOCK"
+        },
+        {
+          "id": "MISSING_IN_MIXPANEL|txn_missing_refund|refund|u00002|Production|USD|mock-run-20261107|mock-lumen",
+          "cls": "MISSING_IN_MIXPANEL",
+          "txn": "txn_missing_refund",
+          "user": "u00002",
+          "event_class": "refund",
+          "currency": "USD",
+          "environment": "Production",
+          "delta": "6.99",
+          "evidence": "Source has event; destination lacks matching class in declared scope",
+          "note": "Synthetic observations; no provider calls",
+          "provenance": "FULL_MOCK"
+        }
+      ],
+      "evidence_hash": "1bcd36f753e940a9b11ad33c56ff750ca4876c4047bec301123094f07b1b0589",
+      "group_hash": "68cc6ecb9ce03ccc663895a7811d329653c95c65de43d21f0ff023141337ea2b",
+      "state": "open"
+    },
+    {
+      "cls": "PRICE_MISMATCH",
+      "action": "post_correction",
+      "writes": true,
+      "confidence": "deterministic/mock",
+      "risk": "requires preview and approval",
+      "why": "1 synthetic finding(s); deterministic rule",
+      "delta": {
+        "EUR": "989.01"
+      },
+      "users": [
+        "u00004"
+      ],
+      "findings": [
+        {
+          "id": "PRICE_MISMATCH|txn_price|purchase|u00004|Production|EUR|mock-run-20261107|mock-lumen",
+          "cls": "PRICE_MISMATCH",
+          "txn": "txn_price",
+          "user": "u00004",
+          "event_class": "purchase",
+          "currency": "EUR",
+          "environment": "Production",
+          "delta": "989.01",
+          "evidence": "1 effective destination events, source=9.99, destination+corrections=999.00",
+          "note": "Synthetic observations; no provider calls",
+          "provenance": "FULL_MOCK"
+        }
+      ],
+      "evidence_hash": "fed041d2c66e9e9e80b4e2e58c4710b162305d5b0ae0d027b8d52fbd7ee51bce",
+      "group_hash": "948b04efab5e74b0c256988a2bdd642f281189aaeb41da2510e424de95616d1e",
+      "state": "open"
+    },
+    {
+      "cls": "SANDBOX_EXPECTED",
+      "action": "none",
+      "writes": false,
+      "confidence": "deterministic/mock",
+      "risk": "none",
+      "why": "1 synthetic finding(s); deterministic rule",
+      "delta": {
+        "USD": "0.00"
+      },
+      "users": [
+        "u00008"
+      ],
+      "findings": [
+        {
+          "id": "SANDBOX_EXPECTED|txn_sandbox|purchase|u00008|Sandbox|USD|mock-run-20261107|mock-lumen|7d3a87c5-aeb8-5cd1-818c-56828458eaa4",
+          "cls": "SANDBOX_EXPECTED",
+          "txn": "txn_sandbox",
+          "user": "u00008",
+          "event_class": "purchase",
+          "currency": "USD",
+          "environment": "Sandbox",
+          "delta": "0.00",
+          "evidence": "Sandbox excluded by metric contract",
+          "note": "Synthetic observations; no provider calls",
+          "provenance": "FULL_MOCK"
+        }
+      ],
+      "evidence_hash": "e55a48cc97c46bd35b7106eedf74b3358a7a82d4122d3b136ac3083a6cc6fc07",
+      "group_hash": "b6b4bfa19bc02f5e876044c5d3e62edc6e82a42cba01fa8c1ea8e8964b0db6e9",
+      "state": "expected"
+    },
+    {
+      "cls": "UNMAPPED_EVENT_NAME",
+      "action": "map_event_name",
+      "writes": false,
+      "confidence": "deterministic/mock",
+      "risk": "none",
+      "why": "1 synthetic finding(s); deterministic rule",
+      "delta": {
+        "EUR": "0.00"
+      },
+      "users": [
+        "u00005"
+      ],
+      "findings": [
+        {
+          "id": "UNMAPPED_EVENT_NAME|txn_renamed|purchase|u00005|Production|EUR|mock-run-20261107|mock-lumen",
+          "cls": "UNMAPPED_EVENT_NAME",
+          "txn": "txn_renamed",
+          "user": "u00005",
+          "event_class": "purchase",
+          "currency": "EUR",
+          "environment": "Production",
+          "delta": "0.00",
+          "evidence": "Known transaction and identity present under an unmapped event name; do not backfill",
+          "note": "Synthetic observations; no provider calls",
+          "provenance": "FULL_MOCK"
+        }
+      ],
+      "evidence_hash": "0a5935ce54b7a8350478fdaaa93fe950b947faa94a6e04d6b557f63445f33394",
+      "group_hash": "97b6c9c8dc1ac67955c51ec8ba8e28186f8da01a21f68e689220702727812ea0",
+      "state": "open"
+    }
+  ],
+  "group_states": {
+    "MISSING_IN_MIXPANEL": "open",
+    "PRICE_MISMATCH": "open",
+    "DUPLICATE_IN_MIXPANEL": "open",
+    "UNMAPPED_EVENT_NAME": "open",
+    "EXTRA_IN_MIXPANEL": "manual",
+    "SANDBOX_EXPECTED": "expected",
+    "AMBIGUOUS_IDENTITY": "open",
+    "CURRENCY_MISMATCH": "open",
+    "AMBIGUOUS_EVENT_CLASS": "open"
+  },
+  "raw_event_count": 8,
+  "query_event_count": 8,
+  "pending_count": 0,
+  "approval_count": 0,
+  "action_count": 0,
+  "verification_status": "not_run"
+}

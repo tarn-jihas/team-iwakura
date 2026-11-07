@@ -1,0 +1,11 @@
+{
+  "id": "re_mock_001",
+  "object": "refund",
+  "charge": "ch_mock_001",
+  "payment_intent": "pi_mock_001",
+  "balance_transaction": "txn_mock_refund_001",
+  "amount": 200,
+  "currency": "eur",
+  "created": 1793793600,
+  "status": "succeeded"
+}

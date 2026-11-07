@@ -1,0 +1,24 @@
+{
+  "api_version": "1.0",
+  "event": {
+    "id": "f0df34bc-0273-5c58-a570-5535dda7d939",
+    "type": "RENEWAL",
+    "event_timestamp_ms": 1793707200000,
+    "purchased_at_ms": 1793707200000,
+    "app_user_id": "user_00027",
+    "original_app_user_id": "user_00027",
+    "aliases": [
+      "user_00027"
+    ],
+    "product_id": "demo.monthly",
+    "transaction_id": "1000000000000027",
+    "original_transaction_id": "1000000000000001",
+    "environment": "PRODUCTION",
+    "store": "APP_STORE",
+    "currency": "USD",
+    "price": 10.0,
+    "price_in_purchased_currency": 10.0,
+    "commission_percentage": 0.3,
+    "tax_percentage": 0.0
+  }
+}

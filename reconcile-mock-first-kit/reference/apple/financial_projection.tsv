@@ -1,0 +1,3 @@
+Start Date	End Date	Vendor Identifier	Quantity	Partner Share	Extended Partner Share	Partner Share Currency	Sale or Return	Apple Identifier	Country of Sale	Customer Price	Customer Currency
+11/02/2025	11/29/2025	premium.monthly	2	6.99	13.98	USD	S	1234567890	US	9.99	USD
+11/02/2025	11/29/2025	premium.monthly	-1	6.99	-6.99	USD	R	1234567890	US	-9.99	USD
