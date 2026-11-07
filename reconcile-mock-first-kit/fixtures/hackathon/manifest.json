@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "provenance": "official_hackathon_synthetic",
+  "repository": "https://github.com/kpotehin/adapty-seed-data-hack",
+  "revision": "77d39ed807a66bbebcf24fe67c42be4fc9ef4c82",
+  "scenario_anchor": "2026-11-03T00:12:04Z",
+  "payment_verification": "none; generated subscription history, not real provider receipts",
+  "customer_id_mapping": "offline u00042 corresponds to lumen_<run>_00042; run must be explicitly supplied",
+  "files": {
+    "lumen_dataset.json.gz": {"source_path": "data/lumen_dataset.json.gz", "sha256": "9943d29ded31266d48cf067ff942723ffcbd2d1e64692871b1f0a63a50acb9dd", "users": 5000},
+    "users.csv.gz": {"source_path": "data/offline/users.csv.gz", "sha256": "c5bfb5bb56d2e535f063ed0de24ca96d7819a9f425a19d40514ef49098337994", "rows": 50000},
+    "transactions.csv.gz": {"source_path": "data/offline/transactions.csv.gz", "sha256": "c108832df15af3f89a552c1a39188eab77f05888bbfd34b1233e9a8abc143517", "rows": 29794}
+  }
+}

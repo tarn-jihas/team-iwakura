@@ -4,5 +4,9 @@ __pycache__/
 reconcile-mock-first-kit/runtime/state.json
 reconcile-mock-first-kit/runtime/*.json
 reconcile-mock-first-kit/runtime/*.tmp
+reconcile-mock-first-kit/runtime/recovery/
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
 Reconcile/.openai/
 .artifacts/
