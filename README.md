@@ -1,32 +1,53 @@
 # Reconcile · local hackathon demo
 
-A stateful, **FULL MOCK / SYNTHETIC DATA** subscription reconciliation workspace.
-The supplied visual prototype is connected to the Python mock provider. Two cases
-are available: analytics reconciliation and **Paid Access Recovery** with a working
-mock Lumen app, collector SDK,100-account incident, approved resync and actual gate
-verification.
-All runtime reads and writes stay on `127.0.0.1`; no API keys or installs are needed.
+A stateful, **FULL MOCK / SYNTHETIC DATA** Adapty add-on demo: independent payment
+evidence → Adapty activation → actual Lumen access. Three local HTTP processes
+demonstrate incident diagnosis, a confirmed account cohort, approved repair and
+gate verification. The Python server SDK is executable; the mobile integration
+is a contract and simulator, not a native library. No live credentials or new
+dependencies are needed. Commercial value remains a [pilot hypothesis](docs/PILOT_BRIEF.md).
 
 ## Run
 
-Requires Python 3.9+. Node 18+ is used only for the retained JavaScript tests.
+The implementation toolchain is Python 3.13.13 and Node 22.22.3. Python uses only
+the standard library; Node runs the JavaScript tests.
 
 ```sh
 cd /Users/strahinja/Documents/personal/reconcile
-python3 reconcile-mock-first-kit/reconcile_mock.py seed
-python3 reconcile-mock-first-kit/reconcile_mock.py serve --port 8765
+npm start -- --port 8875
 ```
 
-Open [http://127.0.0.1:8765](http://127.0.0.1:8765).
-`npm run seed` and `npm start` are equivalent shortcuts. Stop with Ctrl+C.
-Startup does not reseed an existing state. Restarting preserves repairs and audit.
-Use **Demo Lab → Reset demo** to deliberately return to the initial state.
-Access recovery seeds itself on first server startup and has a separate reset.
-For an explicit clean seed of both flows, stop the server and run `npm run seed`.
+Open [http://127.0.0.1:8875](http://127.0.0.1:8875). Stop with Ctrl+C. The launcher
+starts provider/Adapty, Lumen and engine processes with separate SQLite state.
+Startup preserves existing recovery state. **Demo Lab → Reset** explicitly resets
+only this new scenario. Use `--runtime /tmp/reconcile-demo-example` for an isolated
+run. The example port leaves an existing demo on 8765 untouched.
 
-## Paid Access Recovery
+Analytics and cancellation regression demos remain in Demo Lab. The standalone
+legacy server is available through `npm run start:legacy`. `npm run seed` resets
+only the legacy fixtures; it is not required for the new recovery demo.
 
-Open **Cases → Open access incident**, or `/access.html`. Demonstrate the Lumen
+## Payment activation recovery
+
+The main flow is **Incident → Evidence and scope → Plan → Approve and run →
+Verified result**. Payment confirmation, Adapty activation and client access are
+separate facts. An incomplete or unknown source blocks automatic repair.
+
+The synthetic Stripe scenario contains 100 accounts: 94 evaluable, 24 with a
+confirmed activation discrepancy and six inconclusive. The verified first
+recovery verifies 24 activations and 23 gates; a new, narrowly approved retry
+verifies the remaining gate. These are recovery counts, not new revenue.
+
+See the [demo walkthrough and final verification](docs/ACTIVATION_VERIFICATION.md),
+[recovery API and responsibilities](docs/RECOVERY_API.md),
+[mobile boundary](docs/MOBILE_CONTRACT.md),
+[product rationale](docs/PAYMENT_ACTIVATION_MVP.md) and
+[pilot criteria](docs/PILOT_BRIEF.md). Native SDKs and live provider behavior are
+outside this iteration.
+
+## Retained cancellation recovery demo
+
+Open **Cancellation recovery**, or `/access.html`. Demonstrate the Lumen
 premium-export denial, then Detect →100/94/24/6 → Preview → Approve → Apply →
 Verify23/1 → Fresh retry → Verify24/0 → successful Lumen export. The source expiry
 stays unchanged; six inconclusive accounts remain excluded; root cause is separate.
@@ -58,18 +79,27 @@ See the [full access demo and API/SDK contracts](docs/PAID_ACCESS_RECOVERY.md) a
 `reconcile_correction` events, separately per currency. Corrections append events;
 they never overwrite the wrong 999 EUR price or delete raw duplicate events.
 This is analytical consistency, not recovered revenue or a real store refund.
-The review assistant is a deterministic explanation and never uses a model key.
+Classification and repair are deterministic; no AI chat or model key is needed.
 
 ## Check
 
 ```sh
 npm test
+npm run test:integration
+npm run test:acceptance
+npm run check:offline
 npm run check:access
 python3 reconcile-mock-first-kit/reconcile_mock.py check
 ```
 
-The test suite and `check:access` use isolated temporary state and loopback HTTP
-servers. The analytics `reconcile_mock.py check` command intentionally reseeds
+The test suites use isolated temporary state and loopback HTTP servers. Recovery
+acceptance starts three subprocesses and checks only public HTTP outputs, audit
+and the Lumen gate. It does not import the engine or inspect its database.
+`check:offline` verifies pinned official fixture checksums, streams all 50,000
+accounts and 29,794 transaction rows, and checks pagination invariance. Those
+records are synthetic history, not proof of real payment.
+
+The analytics `reconcile_mock.py check` command intentionally reseeds
 the demo and leaves it repaired; run `npm run seed`
 afterwards to prepare a fresh presentation. Stop the server before running CLI
 `seed` or `check`; use the UI's Reset action while the server is running.
@@ -80,7 +110,14 @@ that separate browser lab is read-only with respect to the Python repair state.
 ## Layout and limits
 
 - `Reconcile/dist/`: editable frontend source, original design system and fonts.
-  `mock-app.js` is the API-backed main app; `app.js` / `engine.js` retain the old lab.
+  `recovery-app.js` is the main incident flow; `mock-app.js` retains analytics;
+  `app.js` / `engine.js` retain the old fixture lab.
+- `reconcile-mock-first-kit/recovery_service.py`, `recovery_domain.py`:
+  separate HTTP roles, durable recovery state and isolated simulator stores.
+- `reconcile-mock-first-kit/recovery_sdk.py`: signed, versioned metadata and
+  durable bounded outbox; no payment or repair decision logic.
+- `reconcile-mock-first-kit/hackathon_data.py`, `fixtures/hackathon/`:
+  pinned provenance, checksums and streaming official synthetic data import.
 - `reconcile-mock-first-kit/reconcile_mock.py`: Decimal engine, mock providers,
   approval/apply/readback state and loopback HTTP server.
 - `reconcile-mock-first-kit/paid_access.py`, `lumen_app.py`, `collector_sdk.py`:
@@ -90,9 +127,13 @@ that separate browser lab is read-only with respect to the Python repair state.
 - `reconcile-mock-first-kit/reference/`: static synthetic provider-shaped samples.
 - `docs/handoffs/`: implementation and verification context for each request.
 
-Final validation: **75 automated tests pass** (26 JavaScript, 49 Python), including
-the original 42 analytics/legacy tests. The access CLI replay and actual browser
-walkthrough pass. See [analytics verification](docs/VERIFICATION.md),
+Current iteration: **141 automated tests passed** (33 JavaScript, 79 Python,
+6 HTTP integration and 23 black-box acceptance), including the 50k HTTP scan.
+See [final results and limits](docs/ACTIVATION_VERIFICATION.md).
+
+Previous delivery baseline: **75 automated tests passed** (26 JavaScript,
+49 Python), including the original 42 analytics/legacy tests. The previous access
+CLI replay and browser walkthrough passed. See [analytics verification](docs/VERIFICATION.md),
 [access verification](docs/PAID_ACCESS_VERIFICATION.md), and generated evidence in
 `reconcile-mock-first-kit/samples/`.
 

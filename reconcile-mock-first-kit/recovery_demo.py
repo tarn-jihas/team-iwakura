@@ -119,7 +119,7 @@ class Demo:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--port', type=int, default=8765)
+    parser.add_argument('--port', type=int, default=8875)
     parser.add_argument('--runtime', type=Path, default=HERE / 'runtime' / 'recovery')
     args = parser.parse_args()
     if not 0 <= args.port <= 65535:
