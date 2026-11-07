@@ -5,6 +5,7 @@ reconcile-mock-first-kit/runtime/state.json
 reconcile-mock-first-kit/runtime/*.json
 reconcile-mock-first-kit/runtime/*.tmp
 reconcile-mock-first-kit/runtime/recovery/
+reconcile-mock-first-kit/runtime/live-adapty/
 *.sqlite3
 *.sqlite3-wal
 *.sqlite3-shm
