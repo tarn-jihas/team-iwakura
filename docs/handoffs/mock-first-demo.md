@@ -32,6 +32,8 @@ Source: `/Users/strahinja/Downloads/Adapty Reconcile — комплетно ис
 
 ## Verified delivery state
 
+Implementation revision: `411fa64` (initial local project commit).
+
 Integrated main UI, backend, Sources, Demo Lab, history, operations and audit are
 complete for the authoritative P0. Final `npm test`:42 PASS (23JS/19Python); CLI
 `check`:PASS. Actual browser replay confirmed approval3/apply4, pending readback,
