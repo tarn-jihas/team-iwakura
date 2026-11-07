@@ -1,0 +1,38 @@
+{
+  "private_fixture_oracle_not_read_by_engine": true,
+  "scenario": "synthetic reconstruction from supplied incident document",
+  "variant": 0,
+  "affected_ids": [
+    "u00000",
+    "u00295",
+    "u00308",
+    "u00315",
+    "u00348",
+    "u00420",
+    "u00426",
+    "u00436",
+    "u00591",
+    "u00663",
+    "u00773",
+    "u00798",
+    "u00950",
+    "u00998",
+    "u01029",
+    "u01064",
+    "u01078",
+    "u01217",
+    "u01223",
+    "u01224",
+    "u01238",
+    "u01256",
+    "u01367",
+    "u01459"
+  ],
+  "expected_counts": {
+    "confirmed": 24,
+    "healthy": 60,
+    "legitimate_denial": 6,
+    "policy_denial": 4,
+    "inconclusive": 6
+  }
+}

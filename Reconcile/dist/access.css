@@ -1,0 +1,81 @@
+.access-app .page { max-width: 1500px; }
+.access-stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 13px; margin: 20px 0; }
+.access-stat { display: flex; flex-direction: column; gap: 8px; border: 1px solid var(--border); border-radius: 8px; background: var(--card); padding: 18px; }
+.access-stat > span { font-size: 11px; color: var(--text-description); }
+.access-stat strong { font-size: 31px; font-weight: 550; letter-spacing: -.04em; line-height: 1.3; }
+.access-stat small { font-size: 9px; color: var(--text-tertiary); }
+.access-cause { display: flex; align-items: flex-start; gap: 11px; border: 1px solid var(--warning-border); border-radius: 7px; padding: 13px 15px; background: var(--warning-surface); margin: 18px 0; }
+.access-cause-icon { color: var(--warning-text); font-size: 18px; }
+.access-cause strong { font-size: 11px; font-weight: 600; }
+.access-cause p { font-size: 11px; line-height: 1.7; margin-top: 4px; color: var(--text-description); }
+.access-window { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 12px; padding: 17px; background: var(--card); border: 1px solid var(--border); border-radius: 8px; margin: 21px 0 15px; }
+.access-window > div { flex: 1 1 100%; }
+.access-window h2 { font-size: 13px; font-weight: 550; }
+.access-window p { font-size: 10px; color: var(--text-tertiary); margin-top: 5px; line-height: 1.7; }
+.access-window label, .access-field, .lumen-app-content > label { display: flex; flex-direction: column; gap: 7px; font-size: 10px; color: var(--text-description); min-width: 0; }
+.access-window label { flex: 1 1 180px; }
+.access-window input, .access-window select, .access-field select, .lumen-app-content select, .access-account-toolbar select { background: var(--card); border: 1px solid var(--border); color: var(--foreground); border-radius: 5px; padding: 8px; font: inherit; min-height: 35px; min-width: 0; max-width: 100%; }
+.access-window .btn { min-height: 35px; }
+.access-account-toolbar { gap: 12px; flex-wrap: wrap; }
+.access-account-toolbar .search-field { flex: 1; max-width: 350px; }
+.access-account-toolbar select { font-size: 11px; }
+.access-selection { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 12px 17px; background: var(--surface-sunken); border-bottom: 1px solid var(--border); }
+.access-selection > span { flex: 1; font-size: 11px; white-space: nowrap; }
+.access-selection .btn { font-size: 10px; min-height: 28px; padding: 3px 8px; }
+.access-account-table { min-width: 870px; }
+.access-account-table th { font-size: 9px; }
+.access-account-table td { font-size: 11px; vertical-align: top; }
+.access-account-table small { display: block; font-size: 9px; color: var(--text-tertiary); line-height: 1.7; max-width: 230px; margin-top: 5px; }
+.access-account-table input { accent-color: var(--purple-600); width: 15px; height: 15px; }
+.access-app .panel-footer > div { display: flex; gap: 7px; }
+.access-app .panel-footer .btn { min-height: 26px; font-size: 10px; padding: 3px 8px; }
+.access-recovery-card { display: flex; gap: 18px; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; padding: 23px; border: 1px solid var(--border); border-radius: 9px; background: var(--card); margin-bottom: 18px; }
+.access-recovery-card h2 { font-size: 34px; letter-spacing: -.04em; font-weight: 550; margin: 10px 0; }
+.access-recovery-card h2 small { font-size: 13px; font-weight: 400; letter-spacing: 0; color: var(--text-tertiary); }
+.access-recovery-card p { font-size: 11px; color: var(--text-description); line-height: 1.7; }
+.access-recovery-card .receipt-actions { flex-basis: 100%; margin-top: 0; }
+.access-scope-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+.access-scope-grid .mock-contract-card { margin-top: 0; }
+.access-inline-json { font-size: 10px; line-height: 1.8; white-space: pre-wrap; overflow-wrap: anywhere; }
+.access-plan-summary { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; margin-bottom: 18px; font-size: 10px; color: var(--text-tertiary); }
+.access-plan-entry { border: 1px solid var(--border); background: var(--card); border-radius: 6px; margin: 10px 0; padding: 12px; }
+.access-plan-entry:first-of-type { margin-top: 20px; }
+.access-plan-entry summary { color: var(--purple-700); font-size: 11px; cursor: pointer; overflow-wrap: anywhere; }
+.access-plan-entry pre { font-size: 10px; line-height: 1.8; white-space: pre-wrap; overflow-wrap: anywhere; padding-top: 12px; }
+.access-history-row { display: flex; align-items: center; justify-content: space-between; gap: 15px; padding: 17px; border-bottom: 1px solid var(--border-subtle); }
+.access-history-row > div { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+.access-history-row strong { font-size: 12px; font-weight: 550; }
+.access-history-row small { font-size: 10px; color: var(--text-tertiary); overflow-wrap: anywhere; }
+.lumen-layout { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(280px, 1fr); gap: 25px; align-items: start; margin-top: 22px; }
+.lumen-app-card { border: 1px solid var(--border); background: var(--card); border-radius: 12px; overflow: hidden; }
+.lumen-app-header { display: flex; align-items: center; gap: 11px; padding: 18px; }
+.lumen-logo { display: grid; place-items: center; width: 34px; height: 34px; background: var(--foreground); color: white; border-radius: 10px; font-size: 19px; }
+.lumen-app-header > div { display: flex; flex-direction: column; gap: 4px; flex: 1; }
+.lumen-app-header strong { font-family: Manrope, sans-serif; font-size: 15px; }
+.lumen-app-header small { font-size: 10px; color: var(--text-tertiary); }
+.lumen-canvas { background: linear-gradient(155deg, #e4c8b8 0%, #d7c9da 40%, #9da8d4 75%); height: 235px; position: relative; overflow: hidden; }
+.lumen-sun { width: 80px; height: 80px; border-radius: 50%; background: #fff1d4; box-shadow: 0 0 50px #fff1d488; position: absolute; top: 32px; right: 80px; }
+.lumen-hill { position: absolute; width: 110%; height: 220px; border-radius: 45% 70% 0 0; transform: rotate(-9deg); left: -10%; bottom: -110px; background: #5c637c; }
+.lumen-hill.two { left: 28%; bottom: -150px; transform: rotate(20deg); background: #41435f; }
+.lumen-canvas-label { position: absolute; left: 25px; top: 26px; color: #fff; font-size: 14px; font-weight: 500; letter-spacing: -.02em; }
+.lumen-app-content { padding: 22px; }
+.lumen-app-content > label { font-size: 11px; }
+.lumen-app-content select { font-size: 12px; }
+.lumen-app-content > .btn { width: 100%; margin-top: 19px; font-size: 12px; min-height: 39px; }
+.lumen-entitlement { display: flex; gap: 20px; margin-top: 20px; padding: 14px 0; border-top: 1px solid var(--border-subtle); border-bottom: 1px solid var(--border-subtle); }
+.lumen-entitlement span { display: flex; flex-direction: column; gap: 7px; font-size: 9px; color: var(--text-tertiary); flex: 1; }
+.lumen-entitlement strong { font-size: 11px; font-weight: 500; color: var(--foreground); }
+.lumen-gate-result { border-radius: 7px; border: 1px solid var(--warning-border); background: var(--warning-surface); padding: 15px; margin-top: 20px; }
+.lumen-gate-result.allowed { border-color: var(--success-border); background: var(--success-surface); }
+.lumen-gate-result strong { font-size: 12px; }
+.lumen-gate-result p { font-size: 11px; margin-top: 8px; color: var(--text-description); }
+.lumen-gate-result details { font-size: 10px; margin: 12px 0; }
+.lumen-gate-result pre { font-size: 9px; line-height: 1.8; white-space: pre-wrap; overflow-wrap: anywhere; }
+.lumen-layout .mock-contract-card:first-child { margin-top: 0; }
+.access-collector-count { display: flex; align-items: center; gap: 13px; margin: 18px 0; }
+.access-collector-count strong { font-size: 29px; letter-spacing: -.04em; font-weight: 550; }
+.access-collector-count span { font-size: 11px; color: var(--text-tertiary); }
+.access-demo-reset { margin-top: 22px; padding-top: 17px; border-top: 1px solid var(--border); display: flex; flex-direction: column; gap: 9px; }
+.access-demo-reset p { font-size: 10px; color: var(--text-tertiary); line-height: 1.8; }
+@media (max-width: 1150px) { .lumen-layout { grid-template-columns: 1fr; } .lumen-layout > div { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; } .lumen-layout .mock-contract-card { margin-top: 0; } }
+@media (max-width: 700px) { .access-stats { grid-template-columns: 1fr 1fr; gap: 9px; } .access-stat { padding: 14px; } .access-stat small { font-size: 8px; } .access-scope-grid { grid-template-columns: 1fr; } .lumen-layout > div { display: block; } .lumen-layout .mock-contract-card + .mock-contract-card { margin-top: 17px; } .access-window { padding: 14px; } .access-window label { flex-basis: 100%; } .access-window > button { width: 100%; } .access-account-toolbar { flex-direction: column; align-items: stretch; } .access-account-toolbar .search-field { max-width: none; } .access-recovery-card { padding: 18px; } .access-recovery-card h2 small { display: block; margin-top: 10px; line-height: 1.6; } .lumen-app-content { padding: 17px; } .lumen-app-header .badge { font-size: 8px; } }

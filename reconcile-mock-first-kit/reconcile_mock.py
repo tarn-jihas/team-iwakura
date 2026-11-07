@@ -15,6 +15,8 @@ from pathlib import Path
 from threading import RLock
 from urllib.parse import parse_qs, unquote, urlsplit
 from uuid import NAMESPACE_URL, uuid5
+import paid_access
+from collector_sdk import CollectorAuthError
 
 HERE = Path(__file__).resolve().parent
 STATE = HERE / 'runtime' / 'state.json'
@@ -488,6 +490,21 @@ class Handler(BaseHTTPRequestHandler):
     def _do_get(self):
         try:
             path,q=self.route()
+            if path.startswith('/api/access/'):
+                reads={
+                    '/api/access/report':paid_access.report,
+                    '/api/access/audit':paid_access.audit,
+                    '/api/access/registry':paid_access.registry,
+                }
+                if path in reads:return self.respond(reads[path]())
+                if path=='/api/access/evidence':return self.respond(paid_access.evidence(q.get('user',[''])[0]))
+                if path=='/api/access/journal':
+                    query={key:values[0] for key,values in q.items()}
+                    if 'limit' in query:
+                        try:query['limit']=int(query['limit'])
+                        except ValueError:return self.respond({'error':'Invalid journal limit'},400)
+                    return self.respond(paid_access.journal(query))
+                return self.respond({'error':'not found'},404)
             if path=='/api/report':
                 s=read()
                 if q.get('run',[ID])[0]!=ID:return self.respond({'error':'unknown run'},404)
@@ -519,6 +536,7 @@ class Handler(BaseHTTPRequestHandler):
             if asset is None:return self.respond({'error':'not found'},404)
             ctype=mimetypes.guess_type(asset.name)[0] or 'application/octet-stream'
             return self.respond(asset.read_bytes(),ctype=ctype)
+        except paid_access.APIError as exc:return self.respond({'error':str(exc)},exc.status)
         except (ValueError,KeyError,TypeError) as exc:return self.respond({'error':str(exc)},400)
         except Exception:return self.respond({'error':'internal error'},500)
     def write_origin_ok(self):
@@ -555,6 +573,23 @@ class Handler(BaseHTTPRequestHandler):
             raw=self.rfile.read(length)
             def bad_constant(_):raise ValueError('Invalid JSON number')
             body=json.loads(raw or b'{}',parse_constant=bad_constant)
+            if path.startswith('/api/access/') or path in ('/api/collector/events','/mock/lumen/export'):
+                if not isinstance(body,dict):return self.respond({'error':'Object required'},400)
+                mutations={
+                    '/api/access/detect':paid_access.detect,
+                    '/api/access/preview':paid_access.preview,
+                    '/api/access/approve':paid_access.approve,
+                    '/api/access/apply':paid_access.apply,
+                    '/api/access/verify':paid_access.verify,
+                    '/api/access/demo':paid_access.demo,
+                }
+                if path in mutations:return self.respond(mutations[path](body))
+                if path=='/api/collector/events':return self.respond(paid_access.collector(body,self.headers.get('X-Reconcile-Signature','')))
+                if path=='/mock/lumen/export':
+                    if body.get('feature','premium_export')!='premium_export':return self.respond({'error':'Unsupported feature'},400)
+                    result=paid_access.gate(body.get('user_id',''),initiator='customer_demo')
+                    return self.respond(result,200 if result.get('allowed') else 403)
+                return self.respond({'error':'not found'},404)
             s=read()
             if path=='/api/reset':
                 if not isinstance(body,dict):return self.respond({'error':'Object required'},400)
@@ -598,6 +633,8 @@ class Handler(BaseHTTPRequestHandler):
                 commit(s,updated);return self.respond({'code':200,'status':'success_mock','num_records_imported':len(body)})
             if path.startswith('/api/') or path.startswith('/mock/'):return self.respond({'error':'not found'},404)
             return self.respond({'error':'not found'},404)
+        except paid_access.APIError as exc:return self.respond({'error':str(exc),'state':'needs_recheck' if exc.status==409 else 'rejected'},exc.status)
+        except CollectorAuthError as exc:return self.respond({'error':str(exc)},401)
         except (KeyError,ValueError,TypeError,UnicodeDecodeError,json.JSONDecodeError) as exc:return self.respond({'error':str(exc) or 'bad request'},400)
         except Exception:return self.respond({'error':'internal error'},500)
 
@@ -633,5 +670,6 @@ def main():
     if a.command=='advance':print(canon(advance(s,int(a.args[0]) if a.args else 1)['gap']));return
     if a.command=='verify':print(canon(detect(s)['gap']));return
     if a.command=='serve':
+        paid_access.ensure()
         print(f'MOCK ONLY at http://127.0.0.1:{a.port}, no external services');ThreadingHTTPServer(('127.0.0.1',a.port),Handler).serve_forever()
 if __name__=='__main__':main()

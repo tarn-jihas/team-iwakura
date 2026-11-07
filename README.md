@@ -1,7 +1,10 @@
 # Reconcile · local hackathon demo
 
 A stateful, **FULL MOCK / SYNTHETIC DATA** subscription reconciliation workspace.
-The supplied visual prototype is connected to the supplied Python mock provider.
+The supplied visual prototype is connected to the Python mock provider. Two cases
+are available: analytics reconciliation and **Paid Access Recovery** with a working
+mock Lumen app, collector SDK,100-account incident, approved resync and actual gate
+verification.
 All runtime reads and writes stay on `127.0.0.1`; no API keys or installs are needed.
 
 ## Run
@@ -18,10 +21,22 @@ Open [http://127.0.0.1:8765](http://127.0.0.1:8765).
 `npm run seed` and `npm start` are equivalent shortcuts. Stop with Ctrl+C.
 Startup does not reseed an existing state. Restarting preserves repairs and audit.
 Use **Demo Lab → Reset demo** to deliberately return to the initial state.
+Access recovery seeds itself on first server startup and has a separate reset.
+For an explicit clean seed of both flows, stop the server and run `npm run seed`.
+
+## Paid Access Recovery
+
+Open **Cases → Open access incident**, or `/access.html`. Demonstrate the Lumen
+premium-export denial, then Detect →100/94/24/6 → Preview → Approve → Apply →
+Verify23/1 → Fresh retry → Verify24/0 → successful Lumen export. The source expiry
+stays unchanged; six inconclusive accounts remain excluded; root cause is separate.
+
+See the [full access demo and API/SDK contracts](docs/PAID_ACCESS_RECOVERY.md) and
+[tested recovery evidence](docs/PAID_ACCESS_VERIFICATION.md).
 
 ## Demo walkthrough
 
-1. Open the main case and click **Detect** to save a scan.
+1. Open the analytics case and click **Detect** to save a scan.
 2. Confirm separate initial gaps: **USD +21.97**, **EUR +989.01**.
 3. Inspect **Evidence** on missing purchase/refund, duplicate and price mismatch.
    The source price is 9.99 EUR; the raw destination price is 999.00 EUR.
@@ -49,11 +64,13 @@ The review assistant is a deterministic explanation and never uses a model key.
 
 ```sh
 npm test
+npm run check:access
 python3 reconcile-mock-first-kit/reconcile_mock.py check
 ```
 
-The test suite uses isolated temporary state and loopback HTTP servers. The `check`
-command intentionally reseeds the demo and leaves it repaired; run `npm run seed`
+The test suite and `check:access` use isolated temporary state and loopback HTTP
+servers. The analytics `reconcile_mock.py check` command intentionally reseeds
+the demo and leaves it repaired; run `npm run seed`
 afterwards to prepare a fresh presentation. Stop the server before running CLI
 `seed` or `check`; use the UI's Reset action while the server is running.
 The old engine's six control datasets
@@ -66,22 +83,28 @@ that separate browser lab is read-only with respect to the Python repair state.
   `mock-app.js` is the API-backed main app; `app.js` / `engine.js` retain the old lab.
 - `reconcile-mock-first-kit/reconcile_mock.py`: Decimal engine, mock providers,
   approval/apply/readback state and loopback HTTP server.
+- `reconcile-mock-first-kit/paid_access.py`, `lumen_app.py`, `collector_sdk.py`:
+  access recovery, actual client gate and signed metadata collection.
 - `reconcile-mock-first-kit/runtime/state.json`: local mutable demo state, ignored
   by Git; generated with `seed`. The server serves no runtime or evaluation files.
 - `reconcile-mock-first-kit/reference/`: static synthetic provider-shaped samples.
-- `docs/handoffs/mock-first-demo.md`: current implementation/verification context.
+- `docs/handoffs/`: implementation and verification context for each request.
 
-Final validation: **42 automated tests pass**, plus the CLI replay check and an
-actual browser repair walkthrough. See [verification](docs/VERIFICATION.md) and
-the generated `samples/after_report.json` / `samples/after_audit.json` evidence.
+Final validation: **75 automated tests pass** (26 JavaScript, 49 Python), including
+the original 42 analytics/legacy tests. The access CLI replay and actual browser
+walkthrough pass. See [analytics verification](docs/VERIFICATION.md),
+[access verification](docs/PAID_ACCESS_VERIFICATION.md), and generated evidence in
+`reconcile-mock-first-kit/samples/`.
 
-P0 supports the fixed nine-account, one-app USD/EUR scenario. Google, Apple, Stripe,
+Analytics supports the fixed nine-account, one-app USD/EUR scenario. Google, Apple, Stripe,
 Amplitude, AppsFlyer, PostHog and competitor webhook examples are reference samples,
-not active connectors. No real provider integration, real AI, access unlocking,
-FX conversion or production accounting is implied. The separate 937-order Revenue
-Bridge archive and Paid Access Recovery server were not supplied and are not
-fabricated here. Original archive README files describe their original standalone
+not active connectors. Access recovery changes only our mock Lumen projection and
+cache after fresh entitlement checks; it never grants external licences. No real
+provider integration, real AI, FX conversion or production accounting is implied.
+The separate937-order Revenue Bridge archive was not supplied. Original archive
+README files describe their original standalone
 versions; this README describes the integrated project.
 
-Nothing is pushed or deployed. The retained `Reconcile/.openai` hosting metadata
+Source is maintained in `tarn-jihas/team-iwakura`; no deployment is configured.
+The retained `Reconcile/.openai` hosting metadata
 belongs to the original visual archive and is not used by this local application.

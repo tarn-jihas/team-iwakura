@@ -1,5 +1,10 @@
 # Reconcile mock-first hackathon demo
 
+Historical delivery snapshot. The subsequent explicit Paid Access Recovery
+request supersedes the access-deferred scope below; see
+[the current recovery context](paid-access-recovery.md). The repository was also
+subsequently pushed to `tarn-jihas/team-iwakura` at revision `933c122`.
+
 Task: integrate the two supplied archives into a complete local hackathon demo.
 Authoritative scope: supplied research Markdown, first tab “MOCK-FIRST”, sections
 0–14 (7 November 2026). Later live and access-recovery instructions are historical.

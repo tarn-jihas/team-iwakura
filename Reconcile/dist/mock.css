@@ -82,6 +82,8 @@
 .review-limit p { margin-top: 6px; }
 .mock-footer { display: flex; justify-content: space-between; gap: 12px; padding: 20px 30px; margin-top: 25px; font-size: 9px; color: var(--text-tertiary); border-top: 1px solid var(--border-subtle); }
 .mock-case-entry { display: flex; align-items: center; justify-content: space-between; gap: 25px; padding: 25px; }
+.mock-case-entry + .mock-case-entry { border-top: 1px solid var(--border); }
+#case-type { margin-left: 9px; padding: 6px 9px; background: var(--card); border: 1px solid var(--border); border-radius: 5px; font-size: 11px; }
 .mock-case-entry h2 { font-size: 18px; margin: 8px 0; }
 .mock-case-entry p { display: flex; align-items: center; gap: 7px; font-size: 12px; color: var(--text-tertiary); margin-bottom: 10px; }
 .case-entry-end { display: flex; flex-direction: column; align-items: flex-end; gap: 13px; }
