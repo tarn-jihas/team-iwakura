@@ -20,7 +20,7 @@ SCHEMA_VERSION = 1
 KINDS = frozenset({
     'webhook_received', 'handler_completed', 'access_projection_changed',
     'feature_access_decided', 'source_entitlement_observed',
-    'resync_requested', 'resync_completed', 'verification_completed',
+    'resync_requested', 'resync_completed', 'verification_completed', 'mobile_observation',
 })
 EVENT_FIELDS = frozenset({
     'schema_version', 'event_id', 'run_id', 'app', 'environment', 'app_user_id',
@@ -36,8 +36,10 @@ DETAIL_FIELDS = frozenset({
     'before', 'after', 'cache_invalidated', 'feature', 'decision',
     'policy_version', 'adapter_version', 'initiator', 'starts_at', 'expires_at',
     'action_id', 'expected_revision', 'actual_revision',
+    'observation_kind', 'transaction_id', 'product_id', 'price_id',
 })
 _DETAIL_KEYS = {
+    'mobile_observation': frozenset({'observation_kind', 'transaction_id', 'product_id', 'price_id', 'feature', 'reason_code'}),
     'webhook_received': frozenset({'event_type', 'handler_version', 'received_at', 'processed_at', 'outcome'}),
     'handler_completed': frozenset({'event_type', 'handler_version', 'received_at', 'processed_at', 'outcome', 'reason_code'}),
     'source_entitlement_observed': frozenset({'source_hash', 'starts_at', 'expires_at', 'adapter_version', 'outcome', 'reason_code'}),
@@ -154,6 +156,8 @@ def _validate_details(kind, details):
         raise ValueError('Collector details do not match the event contract')
 
     for field, value in details.items():
+        if kind == 'mobile_observation' and field != 'observation_kind' and value is None:
+            continue
         if field in ('before', 'after'):
             _state(value, field)
         elif field in ('starts_at', 'expires_at', 'processed_at', 'received_at'):
@@ -167,13 +171,16 @@ def _validate_details(kind, details):
         else:
             _text(value, field)
 
-    if 'feature' in details and details['feature'] != 'premium_export':
+    if kind == 'mobile_observation' and details['observation_kind'] not in (
+            'purchase_succeeded', 'subscription_profile_updated', 'access_denied'):
+        raise ValueError('Unsupported mobile observation kind')
+    if details.get('feature') is not None and details['feature'] != 'premium_export':
         raise ValueError('Unsupported collector feature')
     if 'decision' in details and details['decision'] not in ('allow', 'deny'):
         raise ValueError('Unsupported collector decision')
     if 'initiator' in details and details['initiator'] not in ('customer_demo', 'reconcile_probe'):
         raise ValueError('Unsupported collector initiator')
-    if 'reason_code' in details and details['reason_code'] not in _REASONS:
+    if details.get('reason_code') is not None and details['reason_code'] not in _REASONS:
         raise ValueError('Unsupported collector reason code')
     if 'event_type' in details and details['event_type'] != 'subscription_renewal_cancelled':
         raise ValueError('Unsupported collector event type')

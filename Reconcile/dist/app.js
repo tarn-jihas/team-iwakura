@@ -106,7 +106,7 @@ function findCase(id) { return allCases().find(c => c.id === id) || (state.store
 function openCase(id) {
   const c = findCase(id); if (!c) return;
   const last = historyFor(id)[0]; state.current = clone(last?.snapshot?.fingerprint === c.fingerprint ? last.snapshot : c); state.activeRunId = last?.id || null;
-  state.page = 'case'; state.tab = 'findings'; state.findingSearch = ''; state.findingFilter = 'all'; state.operationFilter = 'all'; state.ai = null; state.drawer = null; state.navOpen = false;
+  state.page = 'case'; state.tab = 'findings'; state.findingSearch = ''; state.findingFilter = 'all'; state.operationFilter = 'all'; state.drawer = null; state.navOpen = false;
   persist(); render(); window.scrollTo({ top: 0, behavior: 'instant' });
 }
 function badgeOutcome(c) { if (c.verdict === 'issues') return `<span class="badge badge-amber">${icon('alert', 10)}Needs review</span>`; if (c.verdict === 'inconclusive') return `<span class="badge badge-blue">${icon('info', 10)}Inconclusive</span>`; return `<span class="badge badge-green">${icon('check', 10)}Matched</span>`; }
@@ -120,7 +120,7 @@ function sidebar() {
       <button class="nav-button ${['case', 'cases'].includes(state.page) ? 'active' : ''}" data-action="navigate" data-page="cases">${icon('cases', 17)}Cases<span class="count">${allCases().length}</span></button>
       <button class="nav-button ${state.page === 'sources' ? 'active' : ''}" data-action="navigate" data-page="sources">${icon('layers', 17)}Sources</button>
     </nav>
-    <div class="sidebar-reference"><span class="nav-section-label">Reference check</span><button class="nav-button nav-secondary" data-action="store-case">${icon('shield', 16)}Google Play → Adapty</button></div>
+    <div class="sidebar-reference"><a class="nav-button nav-secondary" href="/recovery.html">Payment Activation Recovery</a><span class="nav-section-label">Reference check</span><button class="nav-button nav-secondary" data-action="store-case">${icon('shield', 16)}Google Play → Adapty</button></div>
     <div class="sidebar-bottom"><button class="nav-button nav-secondary ${state.page === 'method' ? 'active' : ''}" data-action="navigate" data-page="method">${icon('info', 16)}Method & scope</button><a class="nav-button nav-secondary" href="${DOC_URL}" target="_blank" rel="noopener noreferrer">${icon('file', 16)}Specification${icon('external', 12)}</a><div class="storage-note">${icon('folder', 13)}Saved in this browser</div></div>
   </aside>`;
 }
@@ -176,24 +176,7 @@ function runsPanel(c) {
   return `<div class="runs-list">${rows.map((run, i) => `<div class="run-row"><span class="run-icon">${icon('clock', 14)}</span><div class="run-details"><strong>Run ${String(rows.length - i).padStart(2, '0')} ${state.activeRunId === run.id ? '<span class="badge badge-green">Viewing</span>' : i === 0 ? '<span class="badge badge-plain">Latest</span>' : ''}</strong><p>${h(dateTime(run.at))} UTC · ${run.snapshot.findings.length} findings · ${h(money(run.snapshot.deltaMinor, true))}</p></div><button class="btn btn-compact" data-action="open-run" data-id="${h(run.id)}">Open snapshot</button><button class="btn-icon" aria-label="Export saved run" data-action="export-run" data-id="${h(run.id)}">${icon('export', 14)}</button></div>`).join('')}</div><div class="panel-footer"><span>${icon('info', 11)}Last ${MAX_HISTORY} runs per case are stored in this browser.</span></div>`;
 }
 function investigationPanel(c) {
-  return `<aside class="investigation-panel" aria-label="AI investigation preview"><div class="investigation-header"><span class="ai-mark">${icon('spark', 14)}</span><h3>Case assistant</h3><span class="badge">Preview</span></div><div class="investigation-body"><div class="ai-eyebrow">${icon('flask', 11)}Demo · no model connected</div>${state.ai ? aiResponse(c) : `<div class="ai-intro"><p>Summarise the findings or inspect their source references.</p></div><div class="prompt-buttons"><button class="prompt-button" data-action="ask-ai" data-mode="explain">Explain this result${icon('arrow', 12)}</button><button class="prompt-button" data-action="ask-ai" data-mode="evidence">Show me the evidence${icon('arrow', 12)}</button><button class="prompt-button" data-action="ask-ai" data-mode="unknown">What remains unknown?${icon('arrow', 12)}</button></div>`}<form class="ai-input-form" id="ai-form"><input id="ai-question-input" name="question" placeholder="Ask about this case…" aria-label="Question for simulated investigation" autocomplete="off"><button type="submit" aria-label="Show demo explanation">${icon('send', 14)}</button></form><div class="ai-footnote">Responses use this case’s computed results. No live model or MCP connection.</div></div></aside>`;
-}
-function aiResponse(c) {
-  const { mode, question } = state.ai;
-  const refs = c.findings.map((f, i) => ({ f, label: `F${i + 1}` }));
-  let content = '';
-  if (mode === 'unknown') content = `<p><strong>The records establish the discrepancy, not its production root cause.</strong></p><p>These ${c.source === 'synthetic' ? 'synthetic fixtures' : 'imported files'} cannot establish whether a live store charged someone twice, why an event was lost, or whether a provider account export is complete.</p><p>Coverage is <strong>${h(coverageLabels[c.coverage].toLowerCase())}</strong>. Fees, tax adjustments and settlement are outside this money basis.</p>${refs.length ? `<p>Start with the recorded observations: ${refs.map(({ f, label }) => `<button class="evidence-cite" data-action="evidence" data-id="${h(f.id)}">${label}</button>`).join('')}</p>` : ''}`;
-  else if (mode === 'evidence') content = `<p><strong>${c.findings.length ? `${c.findings.length} findings have explicit source references.` : 'Every operation has a matched counterpart in these snapshots.'}</strong></p>${refs.length ? `<ul>${refs.map(({ f, label }) => `<li>${h(f.title)}: ${f.evidence.length} source ${f.evidence.length === 1 ? 'row' : 'rows'}.<button class="evidence-cite" data-action="evidence" data-id="${h(f.id)}">${label}</button></li>`).join('')}</ul>` : `<p>Open a matched operation to compare the original amounts, transaction identity and effective timestamp.</p><button class="prompt-button" data-action="tab" data-tab="operations">Inspect all operations${icon('arrow', 12)}</button>`}<p>Evidence stays linked to the selected saved run. The expected-results oracle is never read by this application.</p>`;
-  else {
-    content = `<p>The net difference is <strong>${h(money(c.deltaMinor, true))}</strong>. ${c.counts.issues ? `<strong>${c.counts.issues} operation-level ${c.counts.issues === 1 ? 'discrepancy remains' : 'discrepancies remain'}.</strong>` : c.counts.inconclusive ? 'The comparison has unresolved coverage or identity limitations.' : 'No economic amount discrepancy remains after delivery deduplication.'}</p>`;
-    if (refs.length) content += `<ul>${refs.map(({ f, label }) => `<li>${h(f.title)}${f.deltaMinor === null ? '' : ` (${h(money(f.deltaMinor, true))})`}.<button class="evidence-cite" data-action="evidence" data-id="${h(f.id)}">${label}</button></li>`).join('')}</ul>`;
-    if (c.counts.issues > 1 && c.deltaMinor === '0') content += '<p><strong>The impacts cancel in the total.</strong> Comparing the operation identities exposes both differences.</p>';
-    if (c.findings.some(f => f.kind === 'economic_duplicate')) content += '<p>Repeated analytics events do not prove a second store charge. Producer instrumentation is one possible explanation.</p>';
-    if (c.findings.some(f => f.kind === 'amount_mismatch')) content += '<p>The amount mismatch is observable. A unit-conversion mistake remains a candidate explanation.</p>';
-    if (c.findings.some(f => f.kind === 'repeated_delivery')) content += `<p>${c.right.rawCount} downstream observations become ${c.right.dedupCount} operations after exact delivery-key deduplication.</p>`;
-    if (!refs.length) content += `<p>All ${c.operations.length} operation groups match within the declared fixture scope. This does not certify a live provider account.</p>`;
-  }
-  return `<div class="ai-question">${h(question)}</div><div class="ai-response">${content}</div><details class="tool-trace"><summary>${icon('code', 12)}Simulated tool trace · 5 steps</summary><div class="trace-list">${[['list_cases', `${allCases().length} cases`], ['get_case', caseCode(c.id)], ['run_reconciliation', 'Current result'], ['list_findings', `${c.findings.length} findings`], ['get_evidence', 'Source rows']].map(([tool, result]) => `<div class="trace-item"><span class="status-dot"></span><code>${tool}</code><span>${h(result)}</span></div>`).join('')}</div></details><button class="ai-reset" data-action="ai-reset">${icon('retry', 11)}Ask another question</button>`;
+  return `<aside class="investigation-panel"><h3>Evidence review</h3><p>Open a finding or operation to inspect its source records and certainty.</p><a class="btn btn-primary" href="/recovery.html">Open Payment Activation Recovery</a></aside>`;
 }
 function casesPage() {
   const cases = allCases(); const q = state.caseSearch.trim().toLowerCase();
@@ -249,7 +232,7 @@ function downloadSource(source) { download(source.rawText, source.filename || `$
 async function runCurrent() {
   if (state.running) return; state.running = true; render();
   await new Promise(resolve => requestAnimationFrame(resolve));
-  try { const old = state.current; const result = { ...reconcile(old.left, old.right, { coverage: old.coverage, label: old.title }), id: old.id, title: old.title, description: old.description }; const row = recordRun(result); state.current = result; state.activeRunId = row.id; state.ai = null;
+  try { const old = state.current; const result = { ...reconcile(old.left, old.right, { coverage: old.coverage, label: old.title }), id: old.id, title: old.title, description: old.description }; const row = recordRun(result); state.current = result; state.activeRunId = row.id;
     const bundleIndex = state.cases.findIndex(c => c.id === result.id); if (bundleIndex >= 0) state.cases[bundleIndex] = result;
     const customIndex = state.customCases.findIndex(c => c.id === result.id); if (customIndex >= 0) state.customCases[customIndex] = result;
     if (state.storeCase?.id === result.id) state.storeCase = result;
@@ -280,7 +263,6 @@ async function importNext() {
   }
   const c = clone(im.preview); state.customCases.push(c); recordRun(c); closeOverlay(); persist(); openCase(c.id); notify('Case created. Inputs, scope and computed result saved locally.');
 }
-function askAI(mode, customQuestion) { const prompts = { explain: 'Explain this result', evidence: 'Show me the evidence', unknown: 'What remains unknown?' }; state.ai = { mode, question: customQuestion || prompts[mode] }; render(); }
 
 document.addEventListener('click', async event => {
   const button = event.target.closest('[data-action]'); if (!button) return;
@@ -301,8 +283,6 @@ document.addEventListener('click', async event => {
   else if (action === 'evidence') openEvidence(state.current.findings.find(f => f.id === button.dataset.id));
   else if (action === 'operation-evidence') { const op = state.current.operations.find(o => o.key === button.dataset.key); if (op) openEvidence({ title: `${op.type === 'refund' ? 'Refund' : 'Charge'} · ${op.status}`, description: 'The operation is grouped by store, environment, transaction identity and type. Source evidence is shown without modifying the payloads.', transactionId: op.transactionId, deltaMinor: op.deltaMinor, certainty: op.status === 'matched' ? 'proven' : state.current.findings.some(f => f.transactionId === op.transactionId && f.certainty === 'inconclusive') ? 'inconclusive' : 'proven', evidence: [...op.leftEvidence, ...op.rightEvidence] }); }
   else if (action === 'close-overlay') closeOverlay();
-  else if (action === 'ask-ai') askAI(button.dataset.mode);
-  else if (action === 'ai-reset') { state.ai = null; render(); }
   else if (action === 'case-source') openOverlay('source', state.current[button.dataset.side]);
   else if (action === 'inventory-source') openOverlay('source', inventory()[Number(button.dataset.index)]);
   else if (action === 'download-case-source') downloadSource(state.current[button.dataset.side]);
@@ -310,7 +290,7 @@ document.addEventListener('click', async event => {
   else if (action === 'download-modal-source') downloadSource(state.modalData);
   else if (action === 'copy-evidence') { const raw = state.drawer.evidence[Number(button.dataset.index)]?.raw; try { await navigator.clipboard.writeText(typeof raw === 'string' ? raw : JSON.stringify(raw, null, 2)); notify('Raw evidence copied.'); } catch { notify('Clipboard is unavailable. Use Export evidence instead.', true); } }
   else if (action === 'download-evidence') { download(JSON.stringify({ case_id: state.current.id, run_fingerprint: state.current.fingerprint, provenance: state.current.source, finding: state.drawer }, null, 2), `${caseCode(state.current.id).toLowerCase()}-evidence.json`); notify('Evidence exported.'); }
-  else if (action === 'open-run') { const run = historyFor(state.current.id).find(r => r.id === button.dataset.id); if (run) { state.current = clone(run.snapshot); state.activeRunId = run.id; state.ai = null; state.tab = 'findings'; render(); notify('Opened the saved run snapshot.'); } }
+  else if (action === 'open-run') { const run = historyFor(state.current.id).find(r => r.id === button.dataset.id); if (run) { state.current = clone(run.snapshot); state.activeRunId = run.id; state.tab = 'findings'; render(); notify('Opened the saved run snapshot.'); } }
   else if (action === 'export-run') { const run = historyFor(state.current.id).find(r => r.id === button.dataset.id); if (run) downloadReport(run.snapshot); }
   else if (action === 'import-mode') { state.import.mode = button.dataset.mode; state.import.coverage = state.import.mode === 'upload' ? 'unknown' : 'declared_complete'; state.import.error = null; state.import.name = ''; renderOverlay(); }
   else if (action === 'browse-file') document.getElementById('import-file')?.click();
@@ -337,7 +317,6 @@ document.addEventListener('change', async event => {
   else if (binding === 'import-coverage') { state.import.coverage = el.value; renderOverlay(); }
   else if (el.id === 'import-file') await acceptFile(el.files?.[0]);
 });
-document.addEventListener('submit', event => { if (event.target.id !== 'ai-form') return; event.preventDefault(); const input = document.getElementById('ai-question-input'), question = input.value.trim(); if (!question) return; const mode = /unknown|cause|why.*lost|complete|coverage|limitation/i.test(question) ? 'unknown' : /evidence|source|row|show|record/i.test(question) ? 'evidence' : 'explain'; askAI(mode, question); });
 document.addEventListener('keydown', event => {
   if (event.key === 'Escape') { if (state.drawer || state.modal) closeOverlay(); else if (state.navOpen) { state.navOpen = false; render(); } }
   if ((event.key === 'Enter' || event.key === ' ') && event.target.matches('tr[data-action]')) { event.preventDefault(); event.target.click(); }

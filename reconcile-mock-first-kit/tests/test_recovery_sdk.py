@@ -328,6 +328,25 @@ class RecoverySDKTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     http_transport(url)
 
+    def test_mobile_observation_is_allowlisted_metadata_without_payment_authority(self):
+        received = []
+        def collect(envelope, signature):
+            event = envelope['event']
+            received.append(event)
+            return {'accepted': True, 'event_id': event['event_id'],
+                    'event_hash': digest(event), 'duplicate': False}
+        sdk = self.make_sdk(collect)
+        details = {'observation_kind': 'purchase_succeeded', 'transaction_id': 'purchase-ref-1',
+                   'product_id': 'premium.annual', 'price_id': None,
+                   'feature': None, 'reason_code': None}
+        sdk.emit('mobile_observation', 'u00001', OCCURRED_AT, details, event_id='mobile-1')
+        self.assertEqual(sdk.flush()['accepted'], 1)
+        self.assertEqual(received[0]['details'], details)
+        for extra in ({'paid': True}, {'receipt': 'secret'}, {'amount_minor': 999},
+                      {'product_id': {'secret': 'value'}}, {'observation_kind': 'grant_premium'}):
+            with self.subTest(extra=extra), self.assertRaises(ValueError):
+                sdk.emit('mobile_observation', 'u00001', OCCURRED_AT, {**details, **extra})
+
 
 if __name__ == '__main__':
     unittest.main()
