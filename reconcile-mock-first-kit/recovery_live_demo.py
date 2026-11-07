@@ -21,6 +21,8 @@ def main():
     parser.add_argument('--runtime', type=Path,
                         default=HERE / 'runtime' / 'live-adapty' / 'demo')
     parser.add_argument('--port', type=int, default=8876)
+    parser.add_argument('--manual', action='store_true',
+                        help='Keep the existing approval-gated manual recovery flow')
     args = parser.parse_args()
     if not 0 <= args.port <= 65535:
         parser.error('port must be between 0 and 65535')
@@ -31,7 +33,8 @@ def main():
 
     signal.signal(signal.SIGTERM, terminate)
     try:
-        with Demo(args.runtime, args.port, live_config=args.config) as demo:
+        with Demo(args.runtime, args.port, live_config=args.config,
+                  auto_repair=not args.manual) as demo:
             with urlopen(demo.urls['engine'] + '/api/recovery/live/status', timeout=15) as response:
                 status = json.load(response)
             print(json.dumps({'mode': 'LIVE_ADAPTY_SEEDED', 'scenario': 'live_adapty',

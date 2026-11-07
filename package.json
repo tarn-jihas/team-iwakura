@@ -12,6 +12,8 @@
     "test": "node --test Reconcile/tests/*.test.mjs && python3 -m unittest discover -s reconcile-mock-first-kit/tests -v",
     "test:integration": "python3 -m unittest discover -s reconcile-mock-first-kit/integration -v",
     "test:acceptance": "python3 -m unittest discover -s reconcile-mock-first-kit/acceptance -v",
-    "test:live": "python3 reconcile-mock-first-kit/live_acceptance.py"
+    "test:live": "python3 reconcile-mock-first-kit/live_acceptance.py",
+    "test:auto": "python3 reconcile-mock-first-kit/automatic_acceptance.py",
+    "benchmark:sdk": "python3 reconcile-mock-first-kit/benchmark_sdk.py"
   }
 }

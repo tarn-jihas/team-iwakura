@@ -5,7 +5,32 @@ engine listens on loopback, rejects cross-origin mutations and serves only
 allowlisted frontend assets. Internal adapter calls and collector delivery use
 HMAC. Runtime databases and signing material are not exposed through static URLs.
 
-## Operator API
+## Automatic monitor API
+
+The live launcher enables policy `local-entitlement-resync-v1`. A signed customer
+denial triggers diagnosis and an exact policy-authorized resync/probe plan. The
+policy never authorizes provider writes or grants; evidence checks and durable
+action receipts remain mandatory. The manual API below stays available for
+regression scenarios and advanced investigation.
+
+| Method / path under `/api/recovery` | Input or meaning |
+| --- | --- |
+| `GET /monitor` | Compact connection, automation, incident summary, SDK coverage, simulation progress and complete incident history; no external Adapty request per UI poll |
+| `POST /simulation` | `{action: "once" or "start", operation_key: "unique-id"}`; runs one random local incident or three sequential examples; duplicate keys reuse the job |
+| `POST /simulation` | `{action: "stop"}`; prevents further injections while current recovery finishes |
+
+Monitor incidents use `detecting`, `repairing`, `repaired` or `unresolved` and
+include `detected_at`, `repair_started_at`, `repaired_at`, `duration_ms`, affected
+and repaired account counts, a description, repair summary and next step.
+Terminal history comes from durable results; a later failure for the same
+account does not rewrite an earlier successful recovery. CSV/JSON export uses
+these incident rows. UTC timestamps remain exact in exports.
+
+```text
+SDK event → scan → policy check → resync → gate verification → incident result
+```
+
+## Advanced operator API
 
 The base path is `/api/recovery`. Requests and responses are JSON. Invalid input
 is rejected; changed evidence/plan/scope returns a conflict rather than a repair.
@@ -50,7 +75,7 @@ An unknown gate is represented by `null`, never inferred as a deny or allow.
 | Provider/Adapty simulator | Independent account/payment evidence, paginated historical observations, catalog/profile reads and simulated validation; owns provider and Adapty stores |
 | Engine | Snapshot/classification/cohort, immutable plan, approval, preflight, durable intent, readback and verified report; owns engine store |
 | Lumen | Account registry, projection/cache, idempotent revision-bound resync and the shared premium/probe authorization decision; owns Lumen store/outbox |
-| Operator | Reviews exact accounts and configuration effect, then authorizes the plan |
+| Automatic policy / operator | Authorizes the exact supported local plan automatically in live mode; operator review remains required for manual regression flows |
 | Mobile simulator | Untrusted observation references forwarded to its backend; cannot confirm payment or repair licences |
 
 The Lumen adapter implements `listAccounts(cursor)` as

@@ -123,7 +123,8 @@ class RecoveryHTTPTests(unittest.TestCase):
             self.assertIn(status, (400, 403, 404), (path, raw[:100]))
 
     def test_home_and_retained_labs_use_local_assets(self):
-        for path, script in (('/', b'recovery-app.js'), ('/analytics.html', b'mock-app.js'),
+        for path, script in (('/', b'monitor-app.js'), ('/recovery-console.html', b'recovery-app.js'),
+                             ('/analytics.html', b'mock-app.js'),
                              ('/access.html', b'access-app.js'), ('/legacy.html', b'app.js')):
             status, headers, raw = self.exchange('engine', path)
             self.assertEqual(status, 200, path)

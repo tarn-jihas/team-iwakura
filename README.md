@@ -1,19 +1,25 @@
 # Reconcile · local hackathon demo
 
-An Adapty add-on demo for incident diagnosis, affected-account detection,
-approved repair and verified Lumen access. Three local HTTP processes and an
+An Adapty add-on demo that detects lost access, repairs it automatically when
+current Adapty evidence supports it, and shows the verified result with its time.
+Three local HTTP processes and an
 executable Python server SDK support two explicit evidence modes:
 
 - **Full mock:** independent synthetic payment evidence → Adapty activation →
   actual local Lumen gate. No credentials are needed.
 - **Live Adapty, seeded data:** real Adapty entitlement reads and CLI catalog
-  integration → actual Lumen SDK events → approved local resync → real gate
+  integration → actual Lumen SDK events → automatic local resync → real gate
   verification. The official seed purchases remain synthetic, not payment proof.
 
 The mobile integration remains a contract and simulator. No new dependencies
 are required. Commercial value remains a [pilot hypothesis](docs/PILOT_BRIEF.md).
 
 For the connected hackathon app, use the [live Lumen demo guide](docs/LIVE_ADAPTY_DEMO.md).
+The main screen shows what happened, how it was repaired and when. **Run demo**
+generates three bounded local failure scenarios; **Simulate once** generates one.
+The server handles detection and recovery. Export the incident timeline as CSV
+or JSON. No operator approval is needed for this narrow local recovery policy.
+See [the policy, research and measured SDK overhead](docs/AUTOMATIC_RECOVERY.md).
 
 ## Run
 
@@ -27,7 +33,7 @@ npm start -- --port 8875
 
 Open [http://127.0.0.1:8875](http://127.0.0.1:8875). Stop with Ctrl+C. The launcher
 starts provider/Adapty, Lumen and engine processes with separate SQLite state.
-Startup preserves existing recovery state. **Demo Lab → Reset** explicitly resets
+Startup preserves existing recovery state. **Advanced tools → Demo Lab → Reset** explicitly resets
 only this new scenario. Use `--runtime /tmp/reconcile-demo-example` for an isolated
 run. The example port leaves an existing demo on 8765 untouched.
 
@@ -35,9 +41,9 @@ Analytics and cancellation regression demos remain in Demo Lab. The standalone
 legacy server is available through `npm run start:legacy`. `npm run seed` resets
 only the legacy fixtures; it is not required for the new recovery demo.
 
-## Payment activation recovery
+## Advanced payment activation demo
 
-The main flow is **Incident → Evidence and scope → Plan → Approve and run →
+The mock console at `/recovery-console.html` retains **Incident → Evidence and scope → Plan → Approve and run →
 Verified result**. Payment confirmation, Adapty activation and client access are
 separate facts. An incomplete or unknown source blocks automatic repair.
 
@@ -119,7 +125,8 @@ that separate browser lab is read-only with respect to the Python repair state.
 ## Layout and limits
 
 - `Reconcile/dist/`: editable frontend source, original design system and fonts.
-  `recovery-app.js` is the main incident flow; `mock-app.js` retains analytics;
+  `monitor-app.js` is the simple automatic incident feed; `recovery-app.js`
+  retains the advanced manual console; `mock-app.js` retains analytics;
   `app.js` / `engine.js` retain the old fixture lab.
 - `reconcile-mock-first-kit/recovery_service.py`, `recovery_domain.py`:
   separate HTTP roles, durable recovery state and isolated simulator stores.
@@ -136,7 +143,12 @@ that separate browser lab is read-only with respect to the Python repair state.
 - `reconcile-mock-first-kit/reference/`: static synthetic provider-shaped samples.
 - `docs/handoffs/`: implementation and verification context for each request.
 
-Live integration checkpoint: **162 automated tests passed** (35 JavaScript,
+Automatic recovery checkpoint: **182 automated tests passed** (42 JavaScript,
+109 Python, 8 HTTP integration and 23 black-box acceptance). The policy tests
+cover bounded retry, partial outcomes, late events, repeated faults, restart and
+stable completed history. See [automatic recovery](docs/AUTOMATIC_RECOVERY.md).
+
+Earlier live integration checkpoint: **162 automated tests passed** (35 JavaScript,
 97 Python, 7 HTTP integration and 23 black-box acceptance), plus the actual
 Adapty public-HTTP and browser recovery replays. See the
 [connected demo evidence](docs/LIVE_ADAPTY_DEMO.md).

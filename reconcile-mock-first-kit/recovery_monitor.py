@@ -1,0 +1,256 @@
+"""Small live incident feed assembled from durable recovery records."""
+from datetime import datetime, timezone
+import json
+
+import recovery_domain as domain
+
+
+def _time(value):
+    try:
+        parsed = datetime.fromisoformat(value.replace('Z', '+00:00'))
+        return parsed.astimezone(timezone.utc)
+    except (AttributeError, TypeError, ValueError):
+        return None
+
+
+def _cause(snapshot, incident):
+    if not snapshot:
+        return ('Checking the reported access problem',
+                'Waiting for the incident scan to collect source and Lumen evidence.')
+    clients = {row['user_id']: row for row in snapshot.get('lumen_accounts', [])}
+    accounts = [row for row in snapshot.get('accounts', []) if row.get('status') == 'confirmed']
+    if not accounts:
+        return ('Access problem needs investigation',
+                'The scan did not confirm an account with current source-backed access, so no cause or repair is claimed.')
+    local = [clients.get(row['id'], {}) for row in accounts]
+    gates = [row.get('gate', {}) for row in local]
+    if any(row.get('reason') == 'cache_stale' for row in gates):
+        return ('Lumen cache was stale',
+                'Adapty showed current access while Lumen denied export on a stale cache. This is correlated local delivery evidence, not proof of the original cause.')
+    if any(row.get('reason') == 'subscription_expired' for row in gates):
+        return ('Lumen had an older entitlement expiry',
+                'Adapty showed current access while Lumen evaluated an earlier local expiry. This is correlated local delivery evidence, not proof of the original cause.')
+    if any(not row.get('access_active') and gate.get('reason') == 'subscription_inactive'
+           for row, gate in zip(local, gates)):
+        return ('Lumen access was not projected',
+                'Adapty showed current access while Lumen had no active local projection. This is correlated local delivery evidence, not proof of the original cause.')
+    return ('Lumen denied access despite current source evidence',
+            'The scan found current Adapty entitlements and denied Lumen gates. The observed evidence does not establish a more specific cause.')
+
+
+def build(engine):
+    manifest = engine._manifest()
+    live = bool(engine.live_config and manifest.get('scenario') == 'live_adapty')
+    if not live:
+        return {'mode': 'FULL_MOCK', 'app': {'id': manifest.get('app'),
+            'title': manifest.get('app_title'), 'environment': manifest.get('environment')},
+            'automation': {'enabled': False, 'policy_id': None},
+            'connection': {'ready': False, 'source_observed_at': None,
+                'active_accounts': 0, 'total_accounts': 0, 'cli_version': None,
+                'catalog_product_count': None},
+            'summary': {'incidents': 0, 'fixed': 0, 'needs_attention': 0,
+                        'affected_accounts': 0},
+            'telemetry': {'queued': 0, 'accepted': 0, 'dropped': 0, 'failed': 0,
+                          'retries': 0, 'last_error': None},
+            'simulation': {'status': 'idle', 'completed': 0, 'total': 0, 'error': None},
+            'incidents': []}
+
+    try:
+        source = engine._internal_request(engine.provider_url, 'GET', '/internal/live/status')
+    except Exception:
+        source = {}
+    try:
+        telemetry = engine._internal_request(engine.lumen_url, 'GET',
+                                              '/internal/lumen/collector-coverage')
+    except Exception:
+        telemetry = {'queued': 0, 'accepted': 0, 'dropped': 0, 'failed': 0,
+                     'retries': 0, 'last_error': 'collector_unavailable'}
+    try:
+        simulation = engine._simulation_summary()
+    except Exception:
+        simulation = {'status': 'idle', 'completed': 0, 'total': 0, 'error': None}
+
+    db = domain.connect(engine.db_path)
+    try:
+        incidents = [dict(row) for row in db.execute(
+            'SELECT id,incident_json,created_at FROM incidents ORDER BY created_at DESC,rowid DESC')]
+        snapshots = {row['id']: json.loads(row['snapshot_json']) for row in db.execute(
+            'SELECT id,snapshot_json FROM snapshots')}
+        plans = [dict(row) for row in db.execute(
+            'SELECT id,incident_id,plan_json,status,created_at_wall FROM plans ORDER BY created_at_wall,rowid')]
+        actions = [dict(row) for row in db.execute('SELECT * FROM actions ORDER BY rowid')]
+        decisions = [dict(row) for row in db.execute(
+            'SELECT * FROM automatic_recovery ORDER BY incident_id,attempt')]
+        jobs = [dict(row) for row in db.execute(
+            'SELECT id,kind,status,payload,result,error,updated_at FROM jobs')]
+    finally:
+        db.close()
+    decisions_by_incident = {}
+    for row in decisions:
+        decisions_by_incident.setdefault(row['incident_id'], []).append(row)
+    plans_by_incident = {}
+    for row in plans:
+        row['plan'] = json.loads(row.pop('plan_json'))
+        plans_by_incident.setdefault(row['incident_id'], []).append(row)
+    actions_by_id = {row['id']: row for row in actions}
+    jobs_by_incident = {}
+    execution_results, execution_finished = {}, {}
+    for job in jobs:
+        try:
+            payload = json.loads(job['payload'])
+            result = json.loads(job['result']) if job['result'] else None
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if payload.get('incident_id'):
+            jobs_by_incident.setdefault(payload['incident_id'], []).append(job)
+        if job['kind'] == 'execution' and payload.get('plan_id') and isinstance(result, dict):
+            execution_results[payload['plan_id']] = result
+            execution_finished[payload['plan_id']] = job['updated_at']
+    feed = []
+    for row in incidents:
+        incident = json.loads(row['incident_json'])
+        snapshot = snapshots.get(incident.get('first_snapshot_id') or incident.get('snapshot_id'))
+        if snapshot is None:
+            snapshot = next((snapshots.get(plan['plan']['snapshot_id'])
+                for plan in plans_by_incident.get(row['id'], [])
+                if snapshots.get(plan['plan']['snapshot_id'])), None)
+        account_rows = [] if snapshot is None else snapshot.get('accounts', [])
+        affected = sorted({item['id'] for item in account_rows
+                           if item.get('status') == 'confirmed'})
+        incident_plans = plans_by_incident.get(row['id'], [])
+        per_account, final_by_account = {}, {}
+        for plan_row in incident_plans:
+            final_result = execution_results.get(plan_row['id'])
+            unresolved_ids = set(final_result.get('unresolved_ids', [])) if final_result else set()
+            for entry in plan_row['plan'].get('entries', []):
+                if entry.get('account_id'):
+                    per_account.setdefault(entry['account_id'], {})[entry['type']] = actions_by_id.get(entry['id'])
+                    if final_result:
+                        final_by_account[entry['account_id']] = (
+                            entry['account_id'] not in unresolved_ids
+                            and final_result.get('access_verified', 0) > 0)
+        repaired, resynced_accounts = set(), set()
+        for plan_row in incident_plans:
+            for entry in plan_row['plan'].get('entries', []):
+                action = actions_by_id.get(entry['id'])
+                if (entry.get('type') == 'resync_access' and entry.get('account_id')
+                        and action and action['status'] == 'verified'):
+                    resynced_accounts.add(entry['account_id'])
+        for user_id in affected:
+            user_actions = per_account.get(user_id, {})
+            probe = user_actions.get('verify_gate')
+            probe_result = json.loads(probe['result']) if probe and probe.get('result') else {}
+            resync = user_actions.get('resync_access')
+            if (probe and probe['status'] == 'verified' and probe_result.get('allowed') is True
+                    and (resync is None or resync['status'] == 'verified')
+                    and final_by_account.get(user_id) is True):
+                repaired.add(user_id)
+        incident_decisions = decisions_by_incident.get(row['id'], [])
+        latest_decision = incident_decisions[-1] if incident_decisions else None
+        try:
+            policy_result = json.loads(latest_decision['outcome_json']) if latest_decision and latest_decision['outcome_json'] else {}
+        except json.JSONDecodeError:
+            policy_result = {}
+        policy_repaired = bool(latest_decision and latest_decision['status'] == 'completed'
+            and policy_result.get('access_verified') == policy_result.get('target_count')
+            and not policy_result.get('unresolved')
+            and affected and len(repaired) == len(affected))
+        incident_jobs = jobs_by_incident.get(row['id'], []) + [job for job in jobs
+            if any(decision['auto_job_id'] == job['id'] or decision.get('execution_job_id') == job['id']
+                   for decision in ([latest_decision] if latest_decision else []))]
+        active = any(job['status'] in ('queued', 'running') for job in incident_jobs)
+        assessment_failed = next((job for job in reversed(incident_jobs)
+                                  if job['kind'] in ('incident', 'scan')
+                                  and job['status'] == 'failed'), None)
+        if policy_repaired:
+            assessment_failed = None
+            status = 'repaired'
+        elif assessment_failed:
+            status = 'unresolved'
+        elif incident.get('status') == 'queued' or snapshot is None:
+            status = 'detecting'
+        elif active or (latest_decision and latest_decision['status'] in
+                        ('queued', 'plan_created', 'awaiting_execution', 'retry_scheduled')):
+            status = 'repairing'
+        elif affected and len(repaired) == len(affected):
+            status = 'repaired'
+        else:
+            status = 'unresolved'
+        title, description = _cause(snapshot or {}, incident)
+        if assessment_failed:
+            title = 'The incident scan did not complete'
+            description = 'Source evidence could not be collected, so no access repair was attempted.'
+        action_feed = []
+        action_started = []
+        for action in actions:
+            if action['plan_id'] not in {plan['id'] for plan in incident_plans}:
+                continue
+            action_feed.append({key: action[key] for key in
+                ('owner', 'status', 'started_at', 'finished_at', 'evidence_ref')})
+            if action.get('started_at'):
+                action_started.append(action['started_at'])
+        detected_at = row['created_at']
+        repair_started_at = min(action_started) if action_started else None
+        repaired_at = None
+        if status == 'repaired':
+            if policy_repaired:
+                repaired_at = latest_decision['updated_at']
+            else:
+                finished = [execution_finished[plan['id']] for plan in incident_plans
+                            if plan['id'] in execution_finished]
+                repaired_at = max(finished, key=lambda value: _time(value) or datetime.min.replace(tzinfo=timezone.utc)) if finished else None
+        detected, repaired_time = _time(detected_at), _time(repaired_at)
+        duration_ms = (max(0, round((repaired_time-detected).total_seconds()*1000))
+                       if detected and repaired_time else None)
+        provenance = (snapshot or {}).get('manifest', {}).get('provenance')
+        payment = (snapshot or {}).get('manifest', {}).get('payment_verification')
+        if status == 'repaired':
+            next_step = 'None. Lumen access was verified.'
+        elif status == 'unresolved':
+            next_step = ('Restore source connectivity and rerun the incident scan.' if assessment_failed else
+                         'Review the current Adapty entitlement, customer mapping and Lumen policy; retry after they agree.')
+        elif status == 'repairing':
+            next_step = 'Waiting for the Lumen gate verification to finish.'
+        else:
+            next_step = 'Waiting for enough source and customer event evidence to finish the scan.'
+        if repaired:
+            if resynced_accounts:
+                summary = (f'Refreshed local Lumen entitlement projections from current Adapty evidence '
+                           f'for {len(resynced_accounts)} accounts, then verified the premium gate for '
+                           f'{len(repaired)} of {len(affected)} affected accounts.')
+            else:
+                summary = (f'Verified the premium gate for {len(repaired)} of '
+                           f'{len(affected)} affected accounts after local access recovery.')
+        elif assessment_failed:
+            summary = 'No repair was attempted because the incident scan failed.'
+        else:
+            summary = 'No safe account had a verified Lumen gate after recovery.' if affected else 'No safe repair target was confirmed.'
+        feed.append({'id': row['id'], 'title': title, 'description': description,
+            'status': status, 'affected_accounts': len(affected),
+            'repaired_accounts': len(repaired), 'detected_at': detected_at,
+            'repair_started_at': repair_started_at, 'repaired_at': repaired_at,
+            'duration_ms': duration_ms, 'repair_summary': summary,
+            'next_step': next_step, 'source_provenance': provenance,
+            'payment_verification': payment, 'actions': action_feed})
+    current = source.get('cli_catalog') or {}
+    total_affected = sum(item['affected_accounts'] for item in feed)
+    return {'mode': 'LIVE_ADAPTY_SEEDED',
+        'app': {'id': manifest.get('app'), 'title': manifest.get('app_title'),
+                'environment': manifest.get('environment')},
+        'automation': {'enabled': bool(engine.auto_repair),
+                       'policy_id': 'local-entitlement-resync-v1' if engine.auto_repair else None},
+        'connection': {'ready': source.get('account_count') == 100
+                and source.get('observed_count') == 100
+                and source.get('identity_match_count') == 100,
+            'source_observed_at': source.get('source_observed_at'),
+            'active_accounts': source.get('active_count', 0),
+            'total_accounts': source.get('account_count', 0),
+            'cli_version': current.get('cli_version'),
+            'catalog_product_count': current.get('product_count')},
+        'summary': {'incidents': len(feed),
+            'fixed': sum(item['status'] == 'repaired' for item in feed),
+            'needs_attention': sum(item['status'] == 'unresolved' for item in feed),
+            'affected_accounts': total_affected},
+        'telemetry': {key: telemetry.get(key) for key in
+            ('queued', 'accepted', 'dropped', 'failed', 'retries', 'last_error')},
+        'simulation': simulation, 'incidents': feed}

@@ -37,9 +37,10 @@ def private_key(path):
 
 class Demo:
     """Own only child processes and their runtime; useful to the external UAT harness."""
-    def __init__(self, runtime, port=0, *, live_config=None):
+    def __init__(self, runtime, port=0, *, live_config=None, auto_repair=False):
         self.runtime = Path(runtime).resolve()
         self.live_config = Path(live_config).resolve() if live_config else None
+        self.auto_repair = bool(auto_repair)
         self.port = port or free_port()
         self.processes = {}
         self.logs = {}
@@ -54,6 +55,8 @@ class Demo:
                    '--key-file', str(key), '--demo']
         if self.live_config:
             command += ['--live-config', str(self.live_config)]
+        if role == 'engine' and self.auto_repair:
+            command += ['--auto-repair']
         if role in ('lumen', 'engine'):
             command += ['--provider-url', self.urls['provider']]
         if role == 'lumen':

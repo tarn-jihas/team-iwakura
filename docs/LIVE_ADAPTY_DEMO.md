@@ -3,7 +3,7 @@
 This demo connects Reconcile to the isolated **Lumen - AI Photo Editor
 (Hackathon)** app, created by the official Adapty hackathon seed. Adapty API
 responses, local Lumen gate decisions, SDK delivery, incident detection,
-approval and client repair actually execute. The purchase records are synthetic.
+automatic policy decisions and client repair actually execute. The purchase records are synthetic.
 They do not prove that a card or app-store account was charged.
 
 ## Setup already performed
@@ -51,17 +51,26 @@ include its version, observation time and a catalog checksum. Account reads use
 the server API; CLI commands are not run for every gate request. Keep the existing
 CLI session authenticated and the private key file available.
 
-1. Open Reconcile and confirm **LIVE ADAPTY · SEEDED DATA**.
-2. In **Lumen Demo**, try a premium export for a healthy account.
-3. Choose **Simulate local access incident**. A controlled local projection bug
-   blocks 24 currently active accounts; Adapty is unchanged.
-4. One actual rejected customer request sends signed SDK telemetry. Reconcile
-   automatically opens the incident and checks the other registered accounts.
-5. Review the independently confirmed cohort and exact repair plan. Enter the
-   operator name, acknowledge the scope, then approve and run.
-6. Each repair rechecks the Adapty entitlement, resynchronizes Lumen and probes
-   the same authorization decision used by the customer endpoint.
-7. Try premium export again and download the HTML report or JSON audit.
+1. Open Reconcile and confirm the live seeded source is ready for 100 accounts.
+2. Choose **Run demo** for three random local incidents, or **Simulate once**
+   for one. The failures emulate stale cache, a missed local projection and
+   an out-of-order expiry update. Adapty stays unchanged.
+3. An actual rejected customer request sends signed SDK telemetry. Reconcile
+   opens the incident and independently checks the registered accounts.
+4. Watch the incident move from detection to repair to the verified result.
+   Each repair rechecks the current Adapty entitlement, resynchronizes Lumen and
+   probes the same authorization decision used by the customer endpoint.
+5. Read what happened, how it was fixed and its timestamps. Export CSV or JSON.
+   **Stop** prevents the next fault while the current recovery finishes.
+
+The policy `local-entitlement-resync-v1` records the exact authorization without
+requiring an operator click. It allows only existing local access to be resynced
+and verified. Unclear evidence remains unresolved. See
+[automatic recovery and measured overhead](AUTOMATIC_RECOVERY.md).
+
+**Advanced tools** retains the detailed console, the fixed 24-account injection,
+the Lumen gate and HTML audit export. To replay the earlier manual workflow,
+start a fresh runtime with `--manual` and use `/recovery-console.html`.
 
 The live plan contains client resync and gate verification only. The existing
 mock payment-activation scenarios still exercise provider validation and catalog
@@ -70,20 +79,48 @@ repair; a source entitlement is never reported as independently verified money.
 
 ## Public HTTP acceptance
 
-Use a fresh local runtime, because this test intentionally injects an incident
-and approves its repair. It does not reseed or mutate the remote app:
+Use a fresh local runtime. The automatic harness injects the fixed 24-account
+incident, waits for recovery without sending an operator approval, then runs
+three randomized incidents and checks stable history, source snapshots and
+actual gates. It does not reseed or mutate the remote app:
+
+```sh
+npm run test:auto -- --url http://127.0.0.1:8876 \
+  --output .artifacts/automatic-recovery-acceptance.json
+```
+
+Final automatic replay on 2026-11-07 passed against the real seeded app:
+**100 registered accounts → 24 affected → 48 verified local actions → 24/24
+actual premium gates**, without an operator approval request. Three further
+random incidents also completed (7, 5 and 4 accounts). All 100 final gates were
+healthy; the original snapshot and incident result stayed unchanged. Duplicate
+simulation requests reused one job. The SDK delivered **1,248 events, zero
+drops/errors**, and drained its outbox. Evidence:
+`.artifacts/automatic-recovery-final.json` and
+`.artifacts/automatic-recovery-final.log`.
+
+The final browser replay passed at 1440px and 390px, with no horizontal overflow
+or console errors. Keyboard Start/Stop and incident details worked; Stop during
+source preparation added no incident. **Simulate once** then repaired two more
+accounts. Both downloaded exports contain the same five repaired incidents,
+exact UTC timestamps and unchanged prior history. Evidence:
+`.artifacts/automatic-incidents.csv`, `.artifacts/automatic-incidents.json`,
+`.artifacts/automatic-recovery-desktop.jpg` and
+`.artifacts/automatic-recovery-mobile.jpg`.
+
+The previous manual acceptance is retained for a fresh `--manual` runtime:
 
 ```sh
 npm run test:live -- --url http://127.0.0.1:8876 \
   --output .artifacts/live-adapty-acceptance.json
 ```
 
-The harness uses public HTTP only. It checks the 100-account scope, automatic
+That harness uses public HTTP only. It checks the 100-account scope, automatic
 24-account detection, blocked unapproved writes, exact 48-step plan, duplicate
 execution, immutable approved snapshot, 24 actual successful customer gates,
 and absence of credentials and fabricated payment proof in the audit.
 
-Verified on 2026-11-07 against the real seeded Adapty app:
+Manual checkpoint verified on 2026-11-07 against the real seeded Adapty app:
 **100 accounts → 24 confirmed discrepancies → 48 verified actions → 24 successful
 customer gates, zero unresolved**. The public-HTTP acceptance run recorded 517
 SDK events, tied the incident to the actual rejected customer request, drained
@@ -100,9 +137,10 @@ Historical telemetry before startup and the future portion of an incident window
 remain incomplete coverage. That does not prevent individually supported repairs,
 and the report keeps those gaps visible after recovery.
 
-For another demonstration, stop the launcher and choose a **new local runtime
-directory**. This resets only the local incident scenario; it does not rerun the
-official seed. The seeded subscriptions have real expiry timestamps, so readiness
+The automatic simulator supports repeated runs in the same runtime and retains
+each incident's result. To start with an empty history, stop the launcher and
+choose a **new local runtime directory**. This does not rerun the official seed.
+The seeded subscriptions have real expiry timestamps, so readiness
 can change over time. Source reads and repair preflight must remain fresh.
 
 ## What the SDK monitors

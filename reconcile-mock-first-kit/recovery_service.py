@@ -12,6 +12,7 @@ import json
 import mimetypes
 import os
 from pathlib import Path
+import random
 import secrets
 import sqlite3
 import socket
@@ -24,12 +25,17 @@ from uuid import uuid4
 import recovery_domain as domain
 import recovery_contracts
 import recovery_live
+import recovery_monitor
 import recovery_scenarios
 
 HERE = Path(__file__).resolve().parent
 STATIC = HERE.parent / 'Reconcile' / 'dist'
 BODY_LIMIT = 1024 * 1024
 MAX_JOB_WORKERS = 8
+AUTOMATIC_POLICY_ID = 'local-entitlement-resync-v1'
+SIMULATION_FAULTS = ('stale_cache', 'missed_projection', 'out_of_order')
+SIMULATION_GAP_SECONDS = 0.25
+SIMULATION_RECOVERY_TIMEOUT = 90
 
 
 class RecoveryError(ValueError):
@@ -73,6 +79,10 @@ def parse_time(value, label='timestamp'):
 
 def iso(value):
     return value.astimezone(timezone.utc).isoformat(timespec='seconds').replace('+00:00', 'Z')
+
+
+def iso_precise(value):
+    return value.astimezone(timezone.utc).isoformat(timespec='microseconds').replace('+00:00', 'Z')
 
 
 def _loopback(value, expected_path=None):
@@ -205,7 +215,8 @@ def _one(query, key, default=None):
 
 class RecoveryService:
     def __init__(self, role, port, db_path, key_file, *, provider_url=None,
-                 lumen_url=None, collector_url=None, demo=False, live_config=None):
+                 lumen_url=None, collector_url=None, demo=False, live_config=None,
+                 auto_repair=False):
         self.role = role
         self.port = port
         self.db_path = Path(db_path).resolve()
@@ -216,11 +227,15 @@ class RecoveryService:
         self.collector_url = self._collector(collector_url, required=role == 'lumen')
         self.demo = bool(demo)
         self.live_config = recovery_live.load_config(live_config) if live_config else None
+        if auto_repair and (role != 'engine' or not self.live_config):
+            raise ValueError('Automatic repair requires the live engine role')
+        self.auto_repair = bool(auto_repair)
         self.live_reader = None
         self.adapty_db = self.db_path.with_name(self.db_path.stem + '-adapty.sqlite3')
         self.outbox_db = self.db_path.with_name(self.db_path.stem + '-outbox.sqlite3')
         self._jobs_lock = threading.Lock()
         self._mutation_lock = threading.RLock()
+        self._simulation_inject_lock = threading.Lock()
         self._active_jobs = set()
         self.server = None
         self.sdk = None
@@ -343,6 +358,8 @@ class RecoveryService:
                 'CREATE TABLE IF NOT EXISTS plans(id TEXT PRIMARY KEY,plan_hash TEXT NOT NULL,incident_id TEXT NOT NULL,snapshot_id TEXT NOT NULL,plan_json TEXT NOT NULL,status TEXT NOT NULL,created_at_wall TEXT NOT NULL,expires_at_wall TEXT NOT NULL,scenario_expires_at TEXT NOT NULL)',
                 'CREATE TABLE IF NOT EXISTS approvals(plan_id TEXT PRIMARY KEY,plan_hash TEXT NOT NULL,actor TEXT NOT NULL,approved_at_wall TEXT NOT NULL)',
                 'CREATE TABLE IF NOT EXISTS actions(id TEXT PRIMARY KEY,plan_id TEXT NOT NULL,account_id TEXT,owner TEXT NOT NULL,target TEXT NOT NULL,preconditions TEXT NOT NULL,status TEXT NOT NULL,started_at TEXT,finished_at TEXT,evidence_ref TEXT,result TEXT)',
+                'CREATE TABLE IF NOT EXISTS automatic_recovery(id TEXT PRIMARY KEY,incident_id TEXT NOT NULL,assessment_snapshot_id TEXT NOT NULL,attempt INTEGER NOT NULL,policy_id TEXT NOT NULL,status TEXT NOT NULL,selected_ids TEXT NOT NULL,auto_job_id TEXT NOT NULL,plan_id TEXT,execution_job_id TEXT,outcome_json TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,UNIQUE(incident_id,attempt),UNIQUE(incident_id,assessment_snapshot_id))',
+                'CREATE TABLE IF NOT EXISTS simulations(id TEXT PRIMARY KEY,operation_key TEXT NOT NULL UNIQUE,status TEXT NOT NULL,sequence_json TEXT NOT NULL,current_index INTEGER NOT NULL,total INTEGER NOT NULL,completed INTEGER NOT NULL,stop_requested INTEGER NOT NULL,current_incident_id TEXT,error TEXT,job_id TEXT NOT NULL UNIQUE,created_at TEXT NOT NULL,updated_at TEXT NOT NULL)',
                 'CREATE TABLE IF NOT EXISTS collector_events(event_id TEXT PRIMARY KEY,payload_hash TEXT NOT NULL,event_json TEXT NOT NULL,recorded_at TEXT NOT NULL,provenance TEXT NOT NULL)',
                 'CREATE TABLE IF NOT EXISTS collector_assessments(event_id TEXT PRIMARY KEY,result TEXT NOT NULL)',
                 'CREATE TABLE IF NOT EXISTS journal(seq INTEGER PRIMARY KEY AUTOINCREMENT,at TEXT NOT NULL,action TEXT NOT NULL,details TEXT NOT NULL)',
@@ -362,7 +379,11 @@ class RecoveryService:
                     _set_meta(db, key, value)
                 _set_meta(db, 'logical_elapsed_seconds', 0)
                 _set_meta(db, 'initialized', True)
-            db.execute("UPDATE jobs SET status='queued',started_at=NULL WHERE status='running'")
+            db.execute("UPDATE simulations SET status='stopped',stop_requested=1,error='Interrupted by server restart',updated_at=? WHERE status='running'",
+                       (self.wall_now(),))
+            db.execute("UPDATE jobs SET status='failed',error='simulation_interrupted_restart',updated_at=? WHERE kind='simulation' AND status='running'",
+                       (self.wall_now(),))
+            db.execute("UPDATE jobs SET status='queued',started_at=NULL WHERE status='running' AND kind!='simulation'")
         finally:
             db.close()
 
@@ -381,10 +402,15 @@ class RecoveryService:
         db = _conn(self.db_path)
         try:
             ids = [row[0] for row in db.execute("SELECT id FROM jobs WHERE status='queued' ORDER BY created_at")]
+            finished = [(row['id'], row['result'], row['error']) for row in db.execute(
+                "SELECT j.id,j.result,j.error FROM automatic_recovery a JOIN jobs j ON j.id=a.execution_job_id "
+                "WHERE a.status='awaiting_execution' AND j.status IN ('completed','failed')")]
         finally:
             db.close()
         for job_id in ids:
             self._launch_job(job_id)
+        for job_id, result, error in finished:
+            self._automatic_execution_finished(job_id, json.loads(result) if result else None, error)
 
     def _record(self, action, details):
         db = _conn(self.db_path)
@@ -398,6 +424,10 @@ class RecoveryService:
     def wall_now():
         return iso(datetime.now(timezone.utc))
 
+    @staticmethod
+    def wall_now_precise():
+        return iso_precise(datetime.now(timezone.utc))
+
     def scenario_now(self):
         db = _conn(self.db_path)
         try:
@@ -409,6 +439,22 @@ class RecoveryService:
         db = _conn(self.db_path)
         try:
             return domain.manifest(db)
+        finally:
+            db.close()
+
+    def _internal_request(self, base_url, method, path, body=None, **kwargs):
+        return internal_request(self.key, base_url, method, path, body, **kwargs)
+
+    def _simulation_summary(self):
+        db = _conn(self.db_path)
+        try:
+            row = db.execute('SELECT status,completed,total,error FROM simulations '
+                             'ORDER BY created_at DESC,rowid DESC LIMIT 1').fetchone()
+            if row is None:
+                return {'status': 'idle', 'completed': 0, 'total': 0, 'error': None}
+            return {'status': 'running' if row['status'] == 'queued' else row['status'],
+                    'completed': row['completed'], 'total': row['total'],
+                    'error': row['error']}
         finally:
             db.close()
 
@@ -851,7 +897,7 @@ class RecoveryService:
         finally:
             db.close()
 
-    def _capture_snapshot(self, incident_id, fresh_live_ids=None):
+    def _capture_snapshot(self, incident_id, fresh_live_ids=None, *, schedule_auto=False):
         incident = self._get_incident(incident_id)
         if (self._manifest().get('scenario') == 'live_adapty'
                 and not incident.get('snapshot_id') and fresh_live_ids is None):
@@ -948,6 +994,7 @@ class RecoveryService:
                                  'inconclusive_accounts': inconclusive_accounts}}
         snapshot['snapshot_hash'] = digest(snapshot)
         db = _conn(self.db_path)
+        automatic_job = None
         try:
             db.execute('BEGIN IMMEDIATE')
             db.execute('INSERT INTO snapshots VALUES(?,?,?,?,?,?)',
@@ -965,6 +1012,28 @@ class RecoveryService:
             current['assessment_summary'] = self._snapshot_summary(snapshot)
             current['status'] = 'scanned'
             db.execute('UPDATE incidents SET incident_json=? WHERE id=?', (_json(current), incident_id))
+            if (schedule_auto and self.auto_repair
+                    and snapshot['manifest'].get('scenario') == 'live_adapty'):
+                selected_ids = sorted(row['id'] for row in accounts
+                    if row.get('status') == 'confirmed' and row.get('eligible'))
+                decision_id = 'auto-'+uuid4().hex
+                automatic_job = 'job-'+uuid4().hex if selected_ids else None
+                now = self.wall_now()
+                cursor = db.execute('INSERT OR IGNORE INTO automatic_recovery VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                    (decision_id, incident_id, snapshot_id, 0, AUTOMATIC_POLICY_ID,
+                     'queued' if selected_ids else 'unresolved', _json(selected_ids),
+                     automatic_job or '', None, None,
+                     None if selected_ids else _json({'reason': 'no_safe_targets'}), now, now))
+                if cursor.rowcount:
+                    if automatic_job:
+                        db.execute('INSERT INTO jobs(id,kind,status,payload,created_at,updated_at) VALUES(?,?,?,?,?,?)',
+                            (automatic_job, 'automatic_recovery', 'queued',
+                             _json({'decision_id': decision_id}), now, now))
+                    db.execute('INSERT INTO journal(at,action,details) VALUES(?,?,?)',
+                        (now, 'automatic_recovery_decided', _json({
+                            'incident_id': incident_id, 'snapshot_id': snapshot_id,
+                            'policy_id': AUTOMATIC_POLICY_ID, 'selected_count': len(selected_ids),
+                            'decision': 'resync_and_verify' if selected_ids else 'no_safe_targets'})))
             db.execute('COMMIT')
         except Exception:
             if db.in_transaction:
@@ -972,6 +1041,7 @@ class RecoveryService:
             raise
         finally:
             db.close()
+        # The queued policy job is durable before a worker can observe it.
         return snapshot
 
     def _get_incident(self, incident_id):
@@ -1040,25 +1110,217 @@ class RecoveryService:
             db.close()
         try:
             if kind in ('incident', 'scan'):
-                snapshot = self._capture_snapshot(payload['incident_id'])
+                snapshot = self._capture_snapshot(payload['incident_id'],
+                                                   schedule_auto=self.auto_repair)
                 result = {'incident_id': payload['incident_id'], 'snapshot_id': snapshot['id'],
                           'snapshot_hash': snapshot['snapshot_hash'],
                           'summary': self._snapshot_summary(snapshot)}
             elif kind == 'execution':
                 result = self._execute_plan(payload['plan_id'], payload['plan_hash'])
+            elif kind == 'automatic_recovery':
+                result = self._run_automatic_recovery(payload['decision_id'])
+            elif kind == 'simulation':
+                result = self._run_simulation(payload['simulation_id'])
             else:
                 raise RecoveryError('Unknown job type')
             self._set_job(job_id, 'completed', result=result)
+            if kind == 'execution':
+                self._automatic_execution_finished(job_id, result)
         except RecoveryError as exc:
             self._set_job(job_id, 'failed', error=str(exc))
+            if kind == 'automatic_recovery':
+                self._finish_automatic_decision(payload['decision_id'], 'unresolved',
+                                                {'reason': str(exc)})
+            elif kind == 'simulation':
+                self._finish_simulation(payload['simulation_id'], 'failed', str(exc))
+            elif kind == 'execution':
+                self._automatic_execution_finished(job_id, None, str(exc))
         except Exception:
             self._set_job(job_id, 'failed', error='job_failed')
+            if kind == 'automatic_recovery':
+                self._finish_automatic_decision(payload['decision_id'], 'unresolved',
+                                                {'reason': 'job_failed'})
+            elif kind == 'simulation':
+                self._finish_simulation(payload['simulation_id'], 'failed', 'Simulation failed')
+            elif kind == 'execution':
+                self._automatic_execution_finished(job_id, None, 'job_failed')
 
     def _set_job(self, job_id, status, *, result=None, error=None):
         db = _conn(self.db_path)
         try:
             db.execute('UPDATE jobs SET status=?,error=?,result=?,updated_at=? WHERE id=?',
                        (status, error, None if result is None else _json(result), self.wall_now(), job_id))
+        finally:
+            db.close()
+
+    def _finish_automatic_decision(self, decision_id, status, outcome):
+        db = _conn(self.db_path)
+        try:
+            db.execute('UPDATE automatic_recovery SET status=?,outcome_json=?,updated_at=? WHERE id=?',
+                       (status, _json(outcome), self.wall_now_precise(), decision_id))
+        finally:
+            db.close()
+
+    def _run_automatic_recovery(self, decision_id):
+        db = _conn(self.db_path)
+        try:
+            row = db.execute('SELECT * FROM automatic_recovery WHERE id=?', (decision_id,)).fetchone()
+            decision = None if row is None else dict(row)
+        finally:
+            db.close()
+        if decision is None:
+            raise RecoveryError('Unknown automatic recovery decision', 404)
+        if decision['status'] in ('completed', 'unresolved'):
+            return {'decision_id': decision_id, 'status': decision['status']}
+        if (decision['policy_id'] != AUTOMATIC_POLICY_ID or not self.live_config
+                or self._manifest().get('scenario') != 'live_adapty'):
+            self._finish_automatic_decision(decision_id, 'unresolved',
+                                            {'reason': 'automatic_policy_scope_changed'})
+            return {'decision_id': decision_id, 'status': 'unresolved'}
+        selected_ids = json.loads(decision['selected_ids'])
+        if not selected_ids:
+            self._finish_automatic_decision(decision_id, 'unresolved',
+                                            {'reason': 'no_safe_targets'})
+            return {'decision_id': decision_id, 'status': 'unresolved'}
+        try:
+            incident = self._get_incident(decision['incident_id'])
+            snapshot = self._load_snapshot(decision['assessment_snapshot_id'])
+            plan = self._create_live_plan(selected_ids, incident, snapshot,
+                                          automatic_decision_id=decision_id)
+            actor = 'policy:' + decision['policy_id']
+            self._approve({'plan_id': plan['id'], 'plan_hash': plan['plan_hash'], 'actor': actor})
+            queued = self._start_execution({'plan_id': plan['id'],
+                'plan_hash': plan['plan_hash']}, launch=False)
+        except RecoveryError as exc:
+            outcome = {'reason': str(exc), 'selected_count': len(selected_ids)}
+            self._finish_automatic_decision(decision_id, 'unresolved', outcome)
+            self._record('automatic_recovery_unresolved', {
+                'decision_id': decision_id, 'incident_id': decision['incident_id'],
+                'policy_id': decision['policy_id'], **outcome})
+            return {'decision_id': decision_id, 'status': 'unresolved', **outcome}
+        db = _conn(self.db_path)
+        try:
+            db.execute('UPDATE automatic_recovery SET status=?,plan_id=?,execution_job_id=?,updated_at=? WHERE id=?',
+                ('awaiting_execution', plan['id'], queued['job_id'], self.wall_now(), decision_id))
+        finally:
+            db.close()
+        job = self._get_job(queued['job_id'])
+        if job['status'] in ('completed', 'failed'):
+            self._automatic_execution_finished(queued['job_id'], job.get('result'), job.get('error'))
+        else:
+            self._launch_job(queued['job_id'])
+        return {'decision_id': decision_id, 'plan_id': plan['id'],
+                'execution_job_id': queued['job_id'], 'status': 'awaiting_execution'}
+
+    def _automatic_execution_finished(self, job_id, result, error=None):
+        db = _conn(self.db_path)
+        try:
+            row = db.execute('SELECT * FROM automatic_recovery WHERE execution_job_id=?',
+                             (job_id,)).fetchone()
+            decision = None if row is None else dict(row)
+        finally:
+            db.close()
+        if decision is None or decision['status'] != 'awaiting_execution':
+            return
+        if error or not isinstance(result, dict):
+            self._finish_automatic_decision(decision['id'], 'unresolved',
+                {'reason': error or 'execution_result_unavailable'})
+            return
+        if result.get('access_verified') == result.get('target_count') and not result.get('unresolved'):
+            if decision['attempt'] == 0:
+                snapshot = self._load_snapshot(decision['assessment_snapshot_id'])
+                scope_ids = {row['id'] for row in snapshot['accounts']
+                             if row.get('status') == 'confirmed'}
+                unselected = scope_ids - set(json.loads(decision['selected_ids']))
+                if unselected:
+                    self._finish_automatic_decision(decision['id'], 'unresolved', {
+                        'reason': 'confirmed_targets_outside_safe_policy_scope',
+                        'unresolved_ids': sorted(unselected), 'execution': result})
+                    return
+            else:
+                db = _conn(self.db_path)
+                try:
+                    parent = db.execute('SELECT outcome_json,selected_ids,assessment_snapshot_id '
+                        'FROM automatic_recovery '
+                        'WHERE incident_id=? AND attempt=0', (decision['incident_id'],)).fetchone()
+                finally:
+                    db.close()
+                if not parent or not parent['outcome_json']:
+                    self._finish_automatic_decision(decision['id'], 'unresolved', {
+                        'reason': 'retry_parent_outcome_missing', 'execution': result})
+                    return
+                try:
+                    initial = json.loads(parent['outcome_json']) if parent and parent['outcome_json'] else {}
+                except json.JSONDecodeError:
+                    initial = {}
+                if not isinstance(initial, dict) or not isinstance(initial.get('unresolved_ids'), list):
+                    self._finish_automatic_decision(decision['id'], 'unresolved', {
+                        'reason': 'retry_parent_outcome_invalid', 'execution': result})
+                    return
+                original = self._load_snapshot(parent['assessment_snapshot_id'])
+                scope_ids = {row['id'] for row in original['accounts']
+                             if row.get('status') == 'confirmed'}
+                remaining = (set(initial['unresolved_ids'])
+                    - set(json.loads(decision['selected_ids']))
+                    | (scope_ids - set(json.loads(parent['selected_ids']))))
+                if remaining:
+                    self._finish_automatic_decision(decision['id'], 'unresolved', {
+                        'reason': 'retry_left_unresolved_targets',
+                        'unresolved_ids': sorted(remaining), 'execution': result})
+                    return
+            self._finish_automatic_decision(decision['id'], 'completed', result)
+            return
+        if decision['attempt'] != 0 or not result.get('snapshot_id'):
+            self._finish_automatic_decision(decision['id'], 'unresolved', result)
+            return
+        snapshot = self._load_snapshot(result['snapshot_id'])
+        accounts = {row['id']: row for row in snapshot['accounts']}
+        probe_only = self._unverified_target_ids(decision['incident_id'])
+        retry_ids = []
+        for user_id in result.get('unresolved_ids', []):
+            row = accounts.get(user_id)
+            if not row:
+                continue
+            safe_resync = row.get('status') == 'confirmed' and row.get('eligible')
+            safe_probe = (row.get('status') in ('healthy', 'pending_verification')
+                          and row.get('gate', {}).get('allowed') is True
+                          and user_id in probe_only)
+            safe_pending_resync = (row.get('status') == 'pending_verification'
+                                   and row.get('eligible')
+                                   and row.get('gate', {}).get('allowed') is False)
+            if safe_resync or safe_probe or safe_pending_resync:
+                retry_ids.append(user_id)
+        if not retry_ids:
+            self._finish_automatic_decision(decision['id'], 'unresolved', {
+                'reason': 'fresh_assessment_has_no_safe_retry',
+                'execution': result})
+            return
+        auto_job_id, retry_id, now = 'job-'+uuid4().hex, 'auto-'+uuid4().hex, self.wall_now()
+        db = _conn(self.db_path)
+        try:
+            db.execute('BEGIN IMMEDIATE')
+            cursor = db.execute('INSERT OR IGNORE INTO automatic_recovery VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                (retry_id, decision['incident_id'], result['snapshot_id'], 1,
+                 decision['policy_id'], 'queued', _json(sorted(retry_ids)),
+                 auto_job_id, None, None, None, now, now))
+            if cursor.rowcount:
+                db.execute('INSERT INTO jobs(id,kind,status,payload,created_at,updated_at) VALUES(?,?,?,?,?,?)',
+                    (auto_job_id, 'automatic_recovery', 'queued',
+                     _json({'decision_id': retry_id}), now, now))
+                db.execute("UPDATE automatic_recovery SET status='retry_scheduled',outcome_json=?,updated_at=? WHERE id=?",
+                    (_json(result), now, decision['id']))
+                db.execute('INSERT INTO journal(at,action,details) VALUES(?,?,?)',
+                    (now, 'automatic_recovery_retry_scheduled', _json({
+                        'incident_id': decision['incident_id'], 'policy_id': decision['policy_id'],
+                        'snapshot_id': result['snapshot_id'], 'target_count': len(retry_ids)})))
+            else:
+                db.execute("UPDATE automatic_recovery SET status='unresolved',outcome_json=?,updated_at=? WHERE id=?",
+                    (_json({'reason': 'retry_already_used', 'execution': result}), now, decision['id']))
+            db.execute('COMMIT')
+        except Exception:
+            if db.in_transaction:
+                db.execute('ROLLBACK')
+            raise
         finally:
             db.close()
 
@@ -1073,7 +1335,7 @@ class RecoveryService:
                 'inconclusive': counts.get('inconclusive', 0)}
 
     def _start_incident(self, user_id, occurred_at=None, window_start=None, window_end=None,
-                        trigger_event_id=None):
+                        trigger_event_id=None, cohort_signature=None):
         manifest = self._manifest()
         if not isinstance(user_id, str) or not user_id.strip() or len(user_id) > 256:
             raise RecoveryError('Invalid user_id')
@@ -1093,16 +1355,23 @@ class RecoveryService:
                     'environment': manifest['environment'], 'window_start': iso(start),
                     'window_end': iso(end), 'occurred_at': iso(at), 'trigger_user_id': user_id,
                     'snapshot_id': None, 'first_snapshot_id': None,
-                    'status': 'queued', 'trigger_event_id': trigger_event_id}
+                    'status': 'queued', 'trigger_event_id': trigger_event_id,
+                    **({'cohort_signature': cohort_signature} if cohort_signature else {})}
         db = _conn(self.db_path)
         try:
             db.execute('BEGIN IMMEDIATE')
             existing = db.execute('SELECT id,incident_json FROM incidents WHERE id=?', (incident_id,)).fetchone()
-            if existing is None:
+            if existing is None and not trigger_event_id:
                 for candidate in db.execute('SELECT id,incident_json FROM incidents ORDER BY rowid DESC'):
                     saved = json.loads(candidate['incident_json'])
+                    saved_signature = saved.get('cohort_signature') or {}
+                    signature_matches = (not cohort_signature and not saved_signature) or bool(
+                        cohort_signature and saved_signature
+                        and saved_signature.get('handler_version') == cohort_signature.get('handler_version')
+                        and saved_signature.get('config_version') == cohort_signature.get('config_version'))
                     if (saved['trigger_user_id'] == user_id and saved['window_start'] == iso(start)
-                            and saved['window_end'] == iso(end) and saved['run_id'] == manifest['run_id']):
+                            and saved['window_end'] == iso(end) and saved['run_id'] == manifest['run_id']
+                            and signature_matches):
                         existing = candidate
                         break
             if trigger_event_id:
@@ -1284,7 +1553,16 @@ class RecoveryService:
                                      'snapshot_id': plan['snapshot_id'], 'target_count': len(ids)})
         return plan
 
-    def _create_live_plan(self, ids, incident, snapshot):
+    def _create_live_plan(self, ids, incident, snapshot, *, automatic_decision_id=None):
+        if automatic_decision_id:
+            db = _conn(self.db_path)
+            try:
+                decision = db.execute('SELECT plan_id FROM automatic_recovery WHERE id=?',
+                                      (automatic_decision_id,)).fetchone()
+            finally:
+                db.close()
+            if decision and decision['plan_id']:
+                return self._load_plan(decision['plan_id'])[1]
         account_by_id = {row['id']: row for row in snapshot['accounts']}
         profiles_by_id = {row['user_id']: row for row in snapshot['adapty_profiles']}
         entitlement_by_id = {row['user_id']: row for row in snapshot['entitlement_evidence']}
@@ -1360,15 +1638,40 @@ class RecoveryService:
                     entry['type'] == 'resync_access' for entry in entries),
                 'access_target': len(ids), 'manual_grant': False, 'provider_writes': 0,
                 'payment_verification': recovery_live.PAYMENT_VERIFICATION}}
+        if automatic_decision_id:
+            plan['automatic_policy_id'] = AUTOMATIC_POLICY_ID
+            plan['automatic_decision_id'] = automatic_decision_id
         plan['plan_hash'] = digest(plan)
         db = _conn(self.db_path)
+        existing_plan_id = None
         try:
-            db.execute('INSERT INTO plans VALUES(?,?,?,?,?,?,?,?,?)',
-                (plan['id'], plan['plan_hash'], plan['incident_id'], plan['snapshot_id'],
-                 _json(plan), 'pending_approval', iso(created_wall), iso(expires_wall),
-                 plan['scenario_expires_at']))
+            db.execute('BEGIN IMMEDIATE')
+            if automatic_decision_id:
+                decision = db.execute('SELECT plan_id FROM automatic_recovery WHERE id=?',
+                                       (automatic_decision_id,)).fetchone()
+                if decision and decision['plan_id']:
+                    existing_plan_id = decision['plan_id']
+                else:
+                    db.execute('INSERT INTO plans VALUES(?,?,?,?,?,?,?,?,?)',
+                        (plan['id'], plan['plan_hash'], plan['incident_id'], plan['snapshot_id'],
+                         _json(plan), 'pending_approval', iso(created_wall), iso(expires_wall),
+                         plan['scenario_expires_at']))
+                    db.execute("UPDATE automatic_recovery SET plan_id=?,status='plan_created',updated_at=? WHERE id=?",
+                               (plan['id'], self.wall_now(), automatic_decision_id))
+            else:
+                db.execute('INSERT INTO plans VALUES(?,?,?,?,?,?,?,?,?)',
+                    (plan['id'], plan['plan_hash'], plan['incident_id'], plan['snapshot_id'],
+                     _json(plan), 'pending_approval', iso(created_wall), iso(expires_wall),
+                     plan['scenario_expires_at']))
+            db.execute('COMMIT')
+        except Exception:
+            if db.in_transaction:
+                db.execute('ROLLBACK')
+            raise
         finally:
             db.close()
+        if existing_plan_id:
+            return self._load_plan(existing_plan_id)[1]
         self._record('plan_created', {'plan_id': plan['id'], 'plan_hash': plan['plan_hash'],
             'snapshot_id': snapshot['id'], 'target_count': len(ids),
             'recovery_basis': 'adapty_entitlement_delivery'})
@@ -1432,7 +1735,7 @@ class RecoveryService:
         return {'plan_id': plan['id'], 'plan_hash': plan['plan_hash'],
                 'actor': body['actor'].strip(), 'approved_at': now, 'duplicate': False}
 
-    def _start_execution(self, body):
+    def _start_execution(self, body, *, launch=True):
         if not isinstance(body, dict) or set(body) != {'plan_id', 'plan_hash'}:
             raise RecoveryError('Execution fields do not match the contract')
         row, plan = self._load_plan(body['plan_id'])
@@ -1492,7 +1795,8 @@ class RecoveryService:
         finally:
             db.close()
         self._record('execution_queued', {'plan_id': plan['id'], 'job_id': job_id})
-        self._launch_job(job_id)
+        if launch:
+            self._launch_job(job_id)
         return {'job_id': job_id, 'plan_id': plan['id'], 'status': 'queued', 'duplicate': False}
 
     def _preflight(self, plan):
@@ -2582,11 +2886,13 @@ class RecoveryService:
             return {'accepted': len(profiles)}
         if self.live_config and path == '/internal/lumen/live/inject':
             required = {'user_ids','handler_version','config_version','occurred_at'}
-            if not isinstance(body, dict) or set(body) != required:
+            if (not isinstance(body, dict) or set(body) - (required | {'fault_kind'})
+                    or not required <= set(body)):
                 raise RecoveryError('Live fault fields do not match the contract')
             try:
                 result = domain.lumen_live_inject_fault(self.db_path, body['user_ids'],
-                    body['handler_version'], body['config_version'], body['occurred_at'])
+                    body['handler_version'], body['config_version'], body['occurred_at'],
+                    body.get('fault_kind', 'missed_projection'))
             except (ValueError, KeyError) as exc:
                 raise RecoveryError(str(exc), 409) from exc
             for item in result['accounts']:
@@ -2654,7 +2960,9 @@ class RecoveryService:
                 handler_version = signature['handler_version']
                 config_version = signature['config_version']
         try:
-            return self.sdk.emit('feature_access_decided', user_id, iso(self.scenario_now()), {
+            occurred_at = (iso_precise(self.scenario_now()) if self.live_config
+                           else iso(self.scenario_now()))
+            return self.sdk.emit('feature_access_decided', user_id, occurred_at, {
                 'feature': feature, 'decision': 'allow' if result['allowed'] else 'deny',
                 'reason_code': result['reason'], 'projection_version': handler_version,
                 'cache_version': config_version, 'policy_version': 'access-policy-v2',
@@ -2787,6 +3095,197 @@ class RecoveryService:
         return {'fault': fault, 'gate': {'status': gate_status, **gate},
             'incident': {'id': None, 'job_id': None,
                          'pending': gate_status == 403 and bool(gate.get('event_id'))}}
+
+    def _simulation(self, body):
+        if not self.demo or not self.live_config or not self.auto_repair:
+            raise RecoveryError('Simulation requires automatic live demo mode', 404)
+        if body == {'action': 'stop'}:
+            with self._simulation_inject_lock:
+                db = _conn(self.db_path)
+                try:
+                    db.execute('BEGIN IMMEDIATE')
+                    row = db.execute("SELECT * FROM simulations WHERE status='running' ORDER BY created_at DESC LIMIT 1").fetchone()
+                    if row is None:
+                        db.execute('COMMIT')
+                        return {'status': 'idle', 'duplicate': False}
+                    db.execute('UPDATE simulations SET stop_requested=1,updated_at=? WHERE id=?',
+                               (self.wall_now(), row['id']))
+                    db.execute('COMMIT')
+                    return {'simulation_id': row['id'], 'job_id': row['job_id'],
+                            'status': 'running', 'duplicate': False, 'stop_requested': True}
+                except Exception:
+                    if db.in_transaction:
+                        db.execute('ROLLBACK')
+                    raise
+                finally:
+                    db.close()
+        if (not isinstance(body, dict) or body.get('action') not in ('once', 'start')
+                or set(body) != {'action', 'operation_key'}
+                or not isinstance(body.get('operation_key'), str)
+                or not body['operation_key'].strip() or len(body['operation_key']) > 128):
+            raise RecoveryError('Simulation fields do not match the contract')
+        operation_key = body['operation_key'].strip()
+        db = _conn(self.db_path)
+        try:
+            previous = db.execute('SELECT id,job_id,status FROM simulations WHERE operation_key=?',
+                                  (operation_key,)).fetchone()
+            if previous:
+                return {'simulation_id': previous['id'], 'job_id': previous['job_id'],
+                        'status': previous['status'], 'duplicate': True}
+            if db.execute("SELECT 1 FROM simulations WHERE status='running' LIMIT 1").fetchone():
+                raise RecoveryError('A simulation is already running', 409)
+            if db.execute("SELECT 1 FROM automatic_recovery a WHERE a.status IN ('queued','plan_created','awaiting_execution','retry_scheduled','unresolved') AND a.attempt=(SELECT MAX(b.attempt) FROM automatic_recovery b WHERE b.incident_id=a.incident_id) LIMIT 1").fetchone():
+                raise RecoveryError('Resolve the previous live incident before starting a simulation', 409)
+        finally:
+            db.close()
+        kinds = [random.choice(SIMULATION_FAULTS)] if body['action'] == 'once' else random.sample(list(SIMULATION_FAULTS), len(SIMULATION_FAULTS))
+        sequence = [{'fault_kind': kind, 'count': random.randint(2, 8)} for kind in kinds]
+        simulation_id, job_id, now = 'simulation-'+uuid4().hex, 'job-'+uuid4().hex, self.wall_now()
+        db = _conn(self.db_path)
+        try:
+            db.execute('BEGIN IMMEDIATE')
+            previous = db.execute('SELECT id,job_id,status FROM simulations WHERE operation_key=?',
+                                   (operation_key,)).fetchone()
+            if previous:
+                db.execute('COMMIT')
+                return {'simulation_id': previous['id'], 'job_id': previous['job_id'],
+                        'status': previous['status'], 'duplicate': True}
+            if db.execute("SELECT 1 FROM simulations WHERE status='running' LIMIT 1").fetchone():
+                raise RecoveryError('A simulation is already running', 409)
+            if db.execute("SELECT 1 FROM automatic_recovery a WHERE a.status IN ('queued','plan_created','awaiting_execution','retry_scheduled','unresolved') AND a.attempt=(SELECT MAX(b.attempt) FROM automatic_recovery b WHERE b.incident_id=a.incident_id) LIMIT 1").fetchone():
+                raise RecoveryError('Resolve the previous live incident before starting a simulation', 409)
+            db.execute('INSERT INTO simulations VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                (simulation_id, operation_key, 'running', _json(sequence), 0, len(sequence),
+                 0, 0, None, None, job_id, now, now))
+            db.execute('INSERT INTO jobs(id,kind,status,payload,created_at,updated_at) VALUES(?,?,?,?,?,?)',
+                (job_id, 'simulation', 'queued', _json({'simulation_id': simulation_id}), now, now))
+            db.execute('COMMIT')
+        except Exception:
+            if db.in_transaction:
+                db.execute('ROLLBACK')
+            raise
+        finally:
+            db.close()
+        self._launch_job(job_id)
+        return {'simulation_id': simulation_id, 'job_id': job_id,
+                'status': 'running', 'duplicate': False}
+
+    def _simulation_row(self, simulation_id):
+        db = _conn(self.db_path)
+        try:
+            row = db.execute('SELECT * FROM simulations WHERE id=?', (simulation_id,)).fetchone()
+            if row is None:
+                raise RecoveryError('Unknown simulation', 404)
+            return dict(row)
+        finally:
+            db.close()
+
+    def _finish_simulation(self, simulation_id, status, error=None):
+        db = _conn(self.db_path)
+        try:
+            db.execute('UPDATE simulations SET status=?,error=?,updated_at=? WHERE id=?',
+                       (status, error, self.wall_now(), simulation_id))
+        finally:
+            db.close()
+
+    def _run_simulation(self, simulation_id):
+        simulation = self._simulation_row(simulation_id)
+        sequence = json.loads(simulation['sequence_json'])
+        for index, step in enumerate(sequence):
+            simulation = self._simulation_row(simulation_id)
+            if simulation['stop_requested']:
+                self._finish_simulation(simulation_id, 'stopped')
+                return {'simulation_id': simulation_id, 'status': 'stopped',
+                        'completed': simulation['completed'], 'total': simulation['total']}
+            event_id = self._inject_simulation_fault(step['fault_kind'], step['count'], simulation_id)
+            if event_id is None:
+                self._finish_simulation(simulation_id, 'stopped')
+                return {'simulation_id': simulation_id, 'status': 'stopped',
+                        'completed': simulation['completed'], 'total': simulation['total']}
+            incident_id = self._wait_for_automatic_recovery(simulation_id, event_id)
+            simulation = self._simulation_row(simulation_id)
+            db = _conn(self.db_path)
+            try:
+                db.execute('UPDATE simulations SET current_index=?,completed=?,current_incident_id=?,updated_at=? WHERE id=?',
+                    (index+1, simulation['completed']+1, incident_id, self.wall_now(), simulation_id))
+            finally:
+                db.close()
+            if index+1 < len(sequence):
+                deadline = time.monotonic()+SIMULATION_GAP_SECONDS
+                while time.monotonic() < deadline:
+                    if self._simulation_row(simulation_id)['stop_requested']:
+                        break
+                    time.sleep(0.05)
+        simulation = self._simulation_row(simulation_id)
+        status = 'stopped' if simulation['stop_requested'] else 'completed'
+        self._finish_simulation(simulation_id, status)
+        return {'simulation_id': simulation_id, 'status': status,
+                'completed': simulation['completed'], 'total': simulation['total']}
+
+    def _inject_simulation_fault(self, fault_kind, count, simulation_id):
+        registry = self._pages(self.provider_url, '/internal/provider/accounts')
+        user_ids = [row['user_id'] for row in registry]
+        refreshed = internal_request(self.key, self.provider_url, 'POST', '/internal/live/refresh',
+                                     {'user_ids': user_ids}, timeout=60)
+        if refreshed.get('observed') != len(user_ids):
+            raise RecoveryError('Live source refresh is incomplete', 503)
+        profiles = self._pages(self.provider_url, '/internal/adapty/profiles')
+        self._notify_live_source_observations(profiles)
+        observations = self._observations()
+        now = datetime.now(timezone.utc)
+        candidates = []
+        for user_id in observations['scope_ids']:
+            profile = observations['profiles_by_id'].get(user_id)
+            entitlement = observations['entitlement_by_id'].get(user_id)
+            provider = observations['provider_by_id'].get(user_id)
+            client = observations['clients_by_id'].get(user_id)
+            if (self._live_entitlement_current(profile, entitlement, user_id, now)
+                    and provider and provider.get('identity_status') == 'mapped'
+                    and client and client.get('identity_status') == 'mapped'
+                    and client.get('policy_enabled') and client.get('gate', {}).get('allowed') is True):
+                candidates.append(user_id)
+        if len(candidates) < count:
+            raise RecoveryError('Not enough healthy source-backed accounts for the simulation', 409)
+        selected = random.sample(candidates, count)
+        signature = uuid4().hex[:12]
+        occurred_at = self.wall_now()
+        with self._simulation_inject_lock:
+            if self._simulation_row(simulation_id)['stop_requested']:
+                return None
+            fault = internal_request(self.key, self.lumen_url, 'POST', '/internal/lumen/live/inject', {
+                'user_ids': selected, 'handler_version': f'lumen-handler-{fault_kind}-{signature}',
+                'config_version': f'premium-export-{fault_kind}-{signature}',
+                'occurred_at': occurred_at, 'fault_kind': fault_kind})
+        if fault.get('account_count') != count:
+            raise RecoveryError('Simulation fault scope did not match the request', 502)
+        gate_status, gate = self._proxy_lumen_gate({'user_id': selected[0]})
+        if gate_status != 403 or not gate.get('event_id'):
+            raise RecoveryError('Simulation could not emit a customer denial event', 503)
+        return gate['event_id']
+
+    def _wait_for_automatic_recovery(self, simulation_id, event_id):
+        deadline = time.monotonic()+SIMULATION_RECOVERY_TIMEOUT
+        while time.monotonic() < deadline:
+            db = _conn(self.db_path)
+            try:
+                incident = db.execute('SELECT id FROM incidents WHERE trigger_event_id=?',
+                                      (event_id,)).fetchone()
+                decision = None if not incident else db.execute(
+                    'SELECT status FROM automatic_recovery WHERE incident_id=? ORDER BY attempt DESC LIMIT 1',
+                    (incident['id'],)).fetchone()
+                scan = None if not incident else db.execute(
+                    "SELECT status,error FROM jobs WHERE kind IN ('incident','scan') AND payload LIKE ? ORDER BY created_at DESC LIMIT 1",
+                    ('%'+incident['id']+'%',)).fetchone()
+            finally:
+                db.close()
+            if incident and decision and decision['status'] == 'completed':
+                return incident['id']
+            if incident and decision and decision['status'] == 'unresolved':
+                raise RecoveryError('Automatic recovery left an incident unresolved', 409)
+            if incident and scan and scan['status'] == 'failed':
+                raise RecoveryError('Incident assessment failed: '+str(scan['error'] or 'unknown'), 503)
+            time.sleep(0.05)
+        raise RecoveryError('Timed out waiting for automatic recovery', 504)
 
     def _demo(self, body):
         with self._mutation_lock:
@@ -2977,10 +3476,20 @@ class RecoveryService:
             try:
                 candidates = [json.loads(row[0]) for row in db.execute(
                     'SELECT incident_json FROM incidents ORDER BY created_at DESC,rowid DESC')]
+                live_signature = {'handler_version': event['details'].get('projection_version'),
+                                  'config_version': event['details'].get('cache_version')}
                 matching = next((item for item in candidates
-                                 if parse_time(item['window_start']) <= at < parse_time(item['window_end'])), None)
+                    if parse_time(item['window_start']) <= at < parse_time(item['window_end'])
+                    and (not live_denial_only or (
+                        (item.get('cohort_signature') or {}).get('handler_version') == live_signature['handler_version']
+                        and (item.get('cohort_signature') or {}).get('config_version') == live_signature['config_version']))
+                    and not (live_denial_only and (closed := db.execute(
+                        'SELECT status,updated_at FROM automatic_recovery WHERE incident_id=? '
+                        'ORDER BY attempt DESC LIMIT 1', (item['id'],)).fetchone())
+                        and closed['status'] == 'completed'
+                        and at >= parse_time(closed['updated_at']))), None)
                 pending = None if matching is None else db.execute(
-                    "SELECT id FROM jobs WHERE kind='scan' AND status='queued' AND payload=? LIMIT 1",
+                    "SELECT id FROM jobs WHERE kind='scan' AND status IN ('queued','running') AND payload=? LIMIT 1",
                     (_json({'incident_id': matching['id']}),)).fetchone()
             finally:
                 db.close()
@@ -2989,8 +3498,13 @@ class RecoveryService:
                 job_id = pending['id'] if pending else self._start_scan(incident_id)
             elif (should_scan and (event['details'].get('decision') == 'deny'
                   or event['details'].get('observation_kind') in ('access_denied', 'purchase_succeeded'))):
+                cohort_signature = None
+                if live_denial_only:
+                    cohort_signature = {'handler_version': event['details'].get('projection_version'),
+                        'config_version': event['details'].get('cache_version'),
+                        'occurred_at': event['occurred_at'], 'trigger_event_id': event['event_id']}
                 incident_id, job_id = self._start_incident(event['app_user_id'], event['occurred_at'],
-                                                         trigger_event_id=event['event_id'])
+                    trigger_event_id=event['event_id'], cohort_signature=cohort_signature)
         if assessed:
             decision = json.loads(assessed['result'])
             incident_id, job_id = decision['incident_id'], decision['job_id']
@@ -3148,6 +3662,8 @@ class RecoveryHandler(_legacy.Handler):
                 return self.respond(self.service.sdk.coverage())
             if self.service.role != 'engine':
                 return self.respond({'error':'not found'}, 404)
+            if path == '/api/recovery/monitor':
+                return self.respond(recovery_monitor.build(self.service))
             if path == '/api/recovery/live/status':
                 return self.respond(self.service._live_status())
             if path == '/api/recovery/report':
@@ -3266,6 +3782,8 @@ class RecoveryHandler(_legacy.Handler):
         if path == '/api/recovery/live/incident':
             result = self.service._live_incident(body)
             return self.respond(result, 202 if result['incident']['pending'] else 200)
+        if path == '/api/recovery/simulation':
+            return self.respond(self.service._simulation(body), 202 if body.get('action') in ('once', 'start') else 200)
         if path == '/api/recovery/demo':
             return self.respond(self.service._demo(body))
         if path in ('/api/recovery/lumen/export','/lumen/export'):
@@ -3313,13 +3831,15 @@ def main(argv=None):
     parser.add_argument('--collector-url')
     parser.add_argument('--demo', action='store_true')
     parser.add_argument('--live-config', type=Path)
+    parser.add_argument('--auto-repair', action='store_true')
     args = parser.parse_args(argv)
     if not 0 <= args.port <= 65535:
         parser.error('--port must be between 0 and 65535')
     service = RecoveryService(args.role, args.port, args.db, args.key_file,
                               provider_url=args.provider_url, lumen_url=args.lumen_url,
                               collector_url=args.collector_url, demo=args.demo,
-                              live_config=args.live_config)
+                              live_config=args.live_config,
+                              auto_repair=args.auto_repair)
     server = RecoveryHTTPServer(service)
     service.server = server
     print(json.dumps({'port': server.server_port, 'role': args.role}, separators=(',', ':')),

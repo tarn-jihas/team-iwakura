@@ -35,7 +35,7 @@ The collector accepts an allowlist, not arbitrary application payloads.
 Offline delivery can be delayed, duplicated or reordered. An event ID identifies
 the immutable observation; reusing it with different content is rejected. Event
 time and collection time remain separate. Late events may produce a new
-assessment but cannot alter an already approved snapshot.
+assessment but cannot alter a snapshot already authorized by policy or operator.
 
 The SDK's outbox is bounded and durable. `emit()` only enqueues; it performs no
 network I/O. A background worker calls `flush()`, with network requests outside
@@ -51,7 +51,8 @@ same authorization decision. The probe does not consume credits or execute an
 expensive premium operation; it proves permission, not the quality of the whole
 premium service.
 
-Only an approved, fresh plan may request resync. Lumen reads current Adapty
+Only a fresh plan authorized by the automatic policy or an operator may request
+resync. Lumen reads current Adapty
 state and checks the expected revision and entitlement hash. It cannot change
 the source payment record or fall back to a generic premium grant.
 

@@ -722,12 +722,14 @@ def lumen_resync(path, body):
         db.close()
 
 
-def lumen_live_inject_fault(path, user_ids, handler_version, config_version, occurred_at):
-    if (not isinstance(user_ids, list) or len(user_ids) != 24
-            or len(set(user_ids)) != 24
+def lumen_live_inject_fault(path, user_ids, handler_version, config_version, occurred_at,
+                            fault_kind='missed_projection'):
+    if (not isinstance(user_ids, list) or not 2 <= len(user_ids) <= 24
+            or len(set(user_ids)) != len(user_ids)
             or any(not isinstance(user_id, str) or not user_id for user_id in user_ids)
             or not isinstance(handler_version, str) or not handler_version
-            or not isinstance(config_version, str) or not config_version):
+            or not isinstance(config_version, str) or not config_version
+            or fault_kind not in ('stale_cache', 'missed_projection', 'out_of_order')):
         raise ValueError('Live fault request is invalid')
     at = iso(_time(occurred_at, 'fault occurrence time'))
     db = connect(path)
@@ -735,8 +737,6 @@ def lumen_live_inject_fault(path, user_ids, handler_version, config_version, occ
     try:
         if _meta(db, 'scenario') != 'live_adapty':
             raise ValueError('Live fault is supported only in the live scenario')
-        if _meta(db, 'live_fault_injected', False):
-            raise ValueError('Live fault was already injected')
         changed = []
         for user_id in user_ids:
             access = db.execute('SELECT * FROM access WHERE user_id=?', (user_id,)).fetchone()
@@ -752,17 +752,31 @@ def lumen_live_inject_fault(path, user_ids, handler_version, config_version, occ
                       'cache_revision': access['cache_revision'],
                       'source_hash': access['entitlement_hash'], 'invalidated': False}
             next_revision = access['projection_revision'] + 1
-            db.execute('UPDATE access SET active=0,projection_revision=?,cache_revision=?,cache_active=0,cache_invalidated=1,updated_at=? WHERE user_id=?',
-                       (next_revision, next_revision, at, user_id))
-            db.execute('INSERT INTO live_fault_tags VALUES(?,?,?,?)',
+            if fault_kind == 'stale_cache':
+                db.execute('UPDATE access SET projection_revision=?,updated_at=? WHERE user_id=?',
+                           (next_revision, at, user_id))
+                after_active, after_expires, after_cache_revision = True, access['expires_at'], access['cache_revision']
+                after_invalidated = False
+            elif fault_kind == 'missed_projection':
+                db.execute('UPDATE access SET active=0,projection_revision=?,cache_revision=?,cache_active=0,cache_invalidated=0,updated_at=? WHERE user_id=?',
+                           (next_revision, next_revision, at, user_id))
+                after_active, after_expires, after_cache_revision = False, access['expires_at'], next_revision
+                after_invalidated = False
+            else:
+                expired_at = iso(_time(at, 'fault occurrence time')-timedelta(seconds=1))
+                db.execute('UPDATE access SET expires_at=?,projection_revision=?,cache_revision=?,cache_expires_at=?,cache_invalidated=0,updated_at=? WHERE user_id=?',
+                           (expired_at, next_revision, next_revision, expired_at, at, user_id))
+                after_active, after_expires, after_cache_revision = True, expired_at, next_revision
+                after_invalidated = False
+            db.execute('INSERT OR REPLACE INTO live_fault_tags VALUES(?,?,?,?)',
                        (user_id, handler_version, config_version, at))
             changed.append({'user_id': user_id, 'before': before,
-                'after': {'active': False, 'premium': False, 'expires_at': access['expires_at'],
-                          'projection_revision': next_revision, 'cache_revision': next_revision,
-                          'source_hash': access['entitlement_hash'], 'invalidated': True},
+                'after': {'active': after_active, 'premium': after_active, 'expires_at': after_expires,
+                          'projection_revision': next_revision, 'cache_revision': after_cache_revision,
+                          'source_hash': access['entitlement_hash'], 'invalidated': after_invalidated},
                 'source_hash': access['entitlement_hash'],
                 'projection_revision': next_revision,
-                'cache_revision': next_revision,
+                'cache_revision': after_cache_revision,
                 'policy_version': 'premium-policy-v1',
                 'adapter_version': 'adapty-profile-read-v1'})
         _set_meta(db, 'live_fault_injected', True)
@@ -770,10 +784,11 @@ def lumen_live_inject_fault(path, user_ids, handler_version, config_version, occ
         _set_meta(db, 'live_fault_handler_version', handler_version)
         _set_meta(db, 'live_fault_config_version', config_version)
         _set_meta(db, 'live_fault_occurred_at', at)
+        _set_meta(db, 'live_fault_kind', fault_kind)
         _set_meta(db, 'live_handler_version', handler_version)
         _set_meta(db, 'live_config_version', config_version)
         db.execute('COMMIT')
-        return {'injected': True, 'account_count': len(changed),
+        return {'injected': True, 'fault_kind': fault_kind, 'account_count': len(changed),
                 'handler_version': handler_version, 'config_version': config_version,
                 'occurred_at': at, 'accounts': changed}
     except Exception:
@@ -790,6 +805,7 @@ def lumen_live_fault_status(path):
         if _meta(db, 'scenario') != 'live_adapty':
             raise ValueError('Live status is supported only in the live scenario')
         return {'injected': bool(_meta(db, 'live_fault_injected', False)),
+                'fault_kind': _meta(db, 'live_fault_kind'),
                 'account_count': _meta(db, 'live_fault_account_count', 0),
                 'handler_version': _meta(db, 'live_fault_handler_version'),
                 'config_version': _meta(db, 'live_fault_config_version'),
