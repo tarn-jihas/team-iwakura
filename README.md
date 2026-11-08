@@ -1,7 +1,8 @@
 # Reconcile · local hackathon demo
 
-An Adapty add-on demo that detects lost access, repairs it automatically when
-current Adapty evidence supports it, and shows the verified result with its time.
+An Adapty add-on demo that connects an observed purchase to application access,
+detects unapplied entitlements proactively, restores existing rights when current
+evidence supports it, and shows the verified result with its time.
 Three local HTTP processes and an
 executable Python server SDK support two explicit evidence modes:
 
@@ -15,10 +16,12 @@ The mobile integration remains a contract and simulator. No new dependencies
 are required. Commercial value remains a [pilot hypothesis](docs/PILOT_BRIEF.md).
 
 For the connected hackathon app, use the [live Lumen demo guide](docs/LIVE_ADAPTY_DEMO.md).
-The main screen shows what happened, how it was repaired and when. **Run demo**
-generates three bounded local failure scenarios; **Simulate once** generates one.
-The server handles detection and recovery. Export the incident timeline as CSV
-or JSON. No operator approval is needed for this narrow local recovery policy.
+The main screen separates **Needs attention** from **Activity** and shows what
+happened, how it was repaired and when. Simulation exercises actual local Lumen
+processing. The engine checks source expectations and application state without
+waiting for a customer complaint. A bounded automatic policy authorizes existing
+local rights only. Export incident activity for a chosen UTC period as CSV or
+JSON, with detailed processing trace available on demand.
 See [the policy, research and measured SDK overhead](docs/AUTOMATIC_RECOVERY.md).
 
 ## Run
@@ -143,25 +146,17 @@ that separate browser lab is read-only with respect to the Python repair state.
 - `reconcile-mock-first-kit/reference/`: static synthetic provider-shaped samples.
 - `docs/handoffs/`: implementation and verification context for each request.
 
-Automatic recovery checkpoint: **182 automated tests passed** (42 JavaScript,
-109 Python, 8 HTTP integration and 23 black-box acceptance). The policy tests
-cover bounded retry, partial outcomes, late events, repeated faults, restart and
-stable completed history. See [automatic recovery](docs/AUTOMATIC_RECOVERY.md).
+Final verification: **253 automated tests passed** (52 JavaScript, 163 Python,
+9 HTTP integration and 29 black-box acceptance), including **1,001 continuous
+local cycles across 50 isolated runtimes**, plus an actual Adapty 100-account
+replay with 23/24 restored gates, restart and further healthy-account recovery. See
+[current verification and limits](docs/AUTOMATIC_RECOVERY.md) and
+[the connected demo evidence](docs/LIVE_ADAPTY_DEMO.md).
 
-Earlier live integration checkpoint: **162 automated tests passed** (35 JavaScript,
-97 Python, 7 HTTP integration and 23 black-box acceptance), plus the actual
-Adapty public-HTTP and browser recovery replays. See the
-[connected demo evidence](docs/LIVE_ADAPTY_DEMO.md).
-
-Mock activation baseline: **141 automated tests passed** (33 JavaScript, 79 Python,
-6 HTTP integration and 23 black-box acceptance), including the 50k HTTP scan.
-See [final results and limits](docs/ACTIVATION_VERIFICATION.md).
-
-Previous delivery baseline: **75 automated tests passed** (26 JavaScript,
-49 Python), including the original 42 analytics/legacy tests. The previous access
-CLI replay and browser walkthrough passed. See [analytics verification](docs/VERIFICATION.md),
-[access verification](docs/PAID_ACCESS_VERIFICATION.md), and generated evidence in
-`reconcile-mock-first-kit/samples/`.
+Earlier analytics, access and activation evidence remains in
+[analytics verification](docs/VERIFICATION.md),
+[access verification](docs/PAID_ACCESS_VERIFICATION.md) and
+[activation verification](docs/ACTIVATION_VERIFICATION.md), including the 50k HTTP scan.
 
 Analytics supports the fixed nine-account, one-app USD/EUR scenario. Google, Apple, Stripe,
 Amplitude, AppsFlyer, PostHog and competitor webhook examples are reference samples,
