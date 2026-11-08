@@ -99,6 +99,55 @@ class FulfillmentEpisodeLinkTests(unittest.TestCase):
             db.close()
         self.assertIsNone(self.h.engine._open_fulfillment_incident_for_handler(event))
 
+    def test_late_gate_revision_reuses_proactive_owner_and_new_fault_opens_new_episode(self):
+        engine = self.h.engine
+        engine.auto_repair = True
+        db = domain.connect(engine.db_path)
+        try:
+            db.execute('UPDATE fulfillment_expectations SET incident_id=NULL,episode_open=0')
+        finally:
+            db.close()
+        def denied_event(event_id):
+            self.h.lumen._lumen_post('/internal/lumen/live/inject', {
+                'user_ids':[self.user,self.h.users[1]],'handler_version':'same-handler',
+                'config_version':'same-config','occurred_at':engine.wall_now_precise()})
+            gate = domain.lumen_access(self.h.lumen.db_path,self.user)
+            self.assertFalse(gate['allowed'])
+            self.h.lumen._emit_gate(self.user,'premium_export',gate,'customer_demo')
+            kind,user,at,details = self.h.lumen.sdk.emit.call_args.args
+            manifest = engine._manifest()
+            return {'schema_version':1,'event_id':event_id,'run_id':manifest['run_id'],
+                'app':manifest['app'],'environment':manifest['environment'],
+                'app_user_id':user,'kind':kind,'occurred_at':at,
+                'correlation_id':event_id,'source_event_id':event_id,'details':details}
+        delayed = denied_event('delayed-customer-gate')
+        engine._live_fulfillment_audit(refresh_source=False)
+        self._finish_jobs()
+        db = domain.connect(engine.db_path)
+        try:
+            first = db.execute('SELECT id FROM incidents').fetchone()[0]
+            jobs_before = db.execute('SELECT COUNT(*) FROM jobs').fetchone()[0]
+        finally:
+            db.close()
+        self.assertTrue(domain.lumen_access(self.h.lumen.db_path,self.user)['allowed'])
+        envelope = {'schema_version':1,'event':delayed,'sent_at':int(time.time())}
+        accepted = engine._collect(envelope,sign(envelope,engine.key))
+        self.assertEqual(accepted['incident_id'],first)
+        self.assertIsNone(accepted['job_id'])
+        db = domain.connect(engine.db_path)
+        try:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM jobs').fetchone()[0],jobs_before)
+        finally:
+            db.close()
+        self.assertEqual(engine._wait_for_automatic_recovery('not-running',delayed['event_id']),first)
+        fresh = denied_event('fresh-customer-gate')
+        self.assertNotEqual(fresh['details']['revisions'],delayed['details']['revisions'])
+        envelope = {'schema_version':1,'event':fresh,'sent_at':int(time.time())}
+        second = engine._collect(envelope,sign(envelope,engine.key))
+        self.assertNotEqual(second['incident_id'],first)
+        self._finish_jobs()
+        self.assertTrue(domain.lumen_access(self.h.lumen.db_path,self.user)['allowed'])
+
     def test_random_cycle_seed_and_selected_fault_survive_idempotent_replay(self):
         engine = self.h.engine
         accepted = engine._live_simulation_control({'action':'once','operation_key':'reproduce-this'})
@@ -272,6 +321,40 @@ class FulfillmentEpisodeLinkTests(unittest.TestCase):
     def test_collector_before_audit_claims_one_episode_before_scan(self):
         self._assert_collector_and_audit_share_one_episode((0,1))
 
+    def test_collector_trigger_and_remaining_audit_cohort_share_one_pending_snapshot(self):
+        engine = self.h.engine
+        engine.auto_repair = True
+        db = domain.connect(engine.db_path)
+        try:
+            db.execute('UPDATE fulfillment_expectations SET incident_id=NULL,episode_open=0')
+        finally:
+            db.close()
+        users = self.h.users[:4]
+        self.h.lumen._lumen_post('/internal/lumen/live/inject', {
+            'user_ids':users,'handler_version':'collector-first-handler',
+            'config_version':'collector-first-config','occurred_at':engine.wall_now_precise()})
+        gate = domain.lumen_access(self.h.lumen.db_path,users[0])
+        self.h.lumen._emit_gate(users[0],'premium_export',gate,'customer_demo')
+        kind,user,at,details = self.h.lumen.sdk.emit.call_args.args
+        manifest = engine._manifest()
+        event = {'schema_version':1,'event_id':'collector-first-cohort',
+            'run_id':manifest['run_id'],'app':manifest['app'],'environment':manifest['environment'],
+            'app_user_id':user,'kind':kind,'occurred_at':at,'correlation_id':'cohort',
+            'source_event_id':'cohort','details':details}
+        envelope = {'schema_version':1,'event':event,'sent_at':int(time.time())}
+        owner = engine._collect(envelope,sign(envelope,engine.key))['incident_id']
+        engine._live_fulfillment_audit(refresh_source=False)
+        self._finish_jobs()
+        db = domain.connect(engine.db_path)
+        try:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM incidents').fetchone()[0],1)
+            self.assertEqual({row[0] for row in db.execute(
+                'SELECT incident_id FROM fulfillment_expectations WHERE incident_id IS NOT NULL')},{owner})
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM actions WHERE status='verified'").fetchone()[0],8)
+        finally:
+            db.close()
+        self.assertTrue(all(domain.lumen_access(self.h.lumen.db_path,user)['allowed'] for user in users))
+
     def test_audit_before_collector_claims_one_episode_before_scan(self):
         self._assert_collector_and_audit_share_one_episode((1,0))
 
@@ -320,6 +403,87 @@ class FulfillmentEpisodeLinkTests(unittest.TestCase):
                 trace = engine._fulfillment_trace(owner)
                 self.assertTrue(trace['processing_receipts'])
                 self.assertEqual({row['user_id'] for row in trace['processing_receipts']},{user})
+        finally:
+            db.close()
+
+    def test_audit_claims_already_fixed_by_collector_do_not_create_an_empty_incident(self):
+        engine = self.h.engine
+        engine.auto_repair = True
+        db = domain.connect(engine.db_path)
+        try:
+            db.execute('UPDATE fulfillment_expectations SET incident_id=NULL,episode_open=0')
+        finally:
+            db.close()
+        db = domain.connect(self.h.lumen.db_path)
+        try:
+            db.executemany('UPDATE access SET active=0,cache_active=0 WHERE user_id=?',
+                [(user,) for user in self.h.users[:2]])
+        finally:
+            db.close()
+        original = engine._start_incident
+        def interleave(*args,**kwargs):
+            if kwargs.get('fulfillment_claims'):
+                event = self._handler_event()
+                envelope = {'schema_version':2,'event':event,'sent_at':int(time.time())}
+                accepted = engine._collect(envelope,sign(envelope,engine.key))
+                engine._run_job(accepted['job_id'])
+            return original(*args,**kwargs)
+        with patch.object(engine,'_start_incident',side_effect=interleave):
+            engine._live_fulfillment_audit(refresh_source=False)
+        self._finish_jobs()
+        db = domain.connect(engine.db_path)
+        try:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM incidents').fetchone()[0],1)
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM actions WHERE status='verified'").fetchone()[0],4)
+        finally:
+            db.close()
+
+    def test_simultaneous_snapshots_recheck_episode_owners_before_selecting_targets(self):
+        engine = self.h.engine
+        db = domain.connect(engine.db_path)
+        try:
+            db.execute('UPDATE fulfillment_expectations SET incident_id=NULL,episode_open=0')
+        finally:
+            db.close()
+        db = domain.connect(self.h.lumen.db_path)
+        try:
+            db.executemany('UPDATE access SET active=0,cache_active=0 WHERE user_id=?',
+                [(user,) for user in self.h.users[:3]])
+        finally:
+            db.close()
+        owners = [engine._start_incident(user)[0] for user in self.h.users[:2]]
+        original = engine._classify
+        barrier = threading.Barrier(2)
+        def classify(*args):
+            result = original(*args)
+            barrier.wait(timeout=10)
+            return result
+        with patch.object(engine,'_classify',side_effect=classify):
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                snapshots = list(executor.map(engine._capture_snapshot,owners))
+        targets = [{row['id'] for row in snapshot['accounts']
+            if row['status']=='confirmed' and row['eligible']} for snapshot in snapshots]
+        self.assertFalse(targets[0] & targets[1])
+        self.assertEqual(targets[0] | targets[1],set(self.h.users[:3]))
+        for snapshot in snapshots:
+            self.assertEqual(engine._load_snapshot(snapshot['id']),snapshot)
+            payload = {key:value for key,value in snapshot.items() if key!='snapshot_hash'}
+            self.assertEqual(service.digest(payload),snapshot['snapshot_hash'])
+
+    def test_obsolete_audit_claim_cannot_create_an_empty_incident(self):
+        engine = self.h.engine
+        db = domain.connect(engine.db_path)
+        try:
+            db.execute('UPDATE fulfillment_expectations SET incident_id=NULL,episode_open=1,'
+                'episode_no=2 WHERE expectation_id=?',(self.expectation['expectation_id'],))
+        finally:
+            db.close()
+        self.assertEqual(engine._start_incident(self.user,trigger_event_id='fulfillment:obsolete',
+            fulfillment_claims=[{'expectation_id':self.expectation['expectation_id'],
+                'episode_no':1}]),(None,None))
+        db = domain.connect(engine.db_path)
+        try:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM incidents').fetchone()[0],0)
         finally:
             db.close()
 

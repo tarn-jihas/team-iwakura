@@ -206,6 +206,19 @@ class RecoverySDKTests(unittest.TestCase):
         self.assertEqual(delivered, [])
         self.assertNotIn('secret-token', str(sdk.coverage()))
 
+    def test_gate_revision_metadata_is_optional_bounded_and_enqueued_without_network(self):
+        sdk = self.make_sdk(lambda *_: self.fail('emit must not use the transport'))
+        revisions = {'identity':1,'policy':1,'projection':2,'cache':1}
+        event = sdk.emit('feature_access_decided','u00001',OCCURRED_AT,
+            {**DETAILS,'revisions':revisions})
+        self.assertTrue(event)
+        for bad in ({**revisions,'projection':True}, {**revisions,'cache':-1},
+                    {**revisions,'secret':'forbidden'}):
+            with self.subTest(revisions=bad), self.assertRaises(ValueError):
+                sdk.emit('feature_access_decided','u00001',OCCURRED_AT,
+                    {**DETAILS,'revisions':bad})
+        self.assertEqual(sdk.coverage()['queued'],1)
+
     def test_outage_survives_restart_and_drains_with_same_event_binding(self):
         class FailsOnce:
             def __init__(self): self.calls = 0

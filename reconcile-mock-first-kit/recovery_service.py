@@ -924,6 +924,8 @@ class RecoveryService:
                                 'processing_outcome':handler_result.get('outcome')}
                                if handler_result else {}),
                             'status': status, 'reason': reason, 'telemetry_gap': telemetry_gap,
+                            'revisions': {name:(client or {}).get(name+'_revision')
+                                for name in ('identity','policy','projection','cache')},
                             'source_period': {'starts_at': entitlement.get('starts_at'),
                                 'expires_at': entitlement.get('expires_at')},
                             'next_step': ('Review source identity/period' if not identity_ok else
@@ -957,10 +959,13 @@ class RecoveryService:
                 trigger_id = 'fulfillment:'+digest(pending_ids)
                 at = datetime.now(timezone.utc)
                 signature = self._live_denial_cohort_signature(pending)
+                claims = pending + [{'expectation_id':item['expectation_id'],
+                    'episode_no':item['episode_no']} for item in current
+                    if item['status']=='discrepancy' and item['episode_open'] and item['incident_id']]
                 incident_id, _ = self._start_incident(pending[0]['user_id'], iso(at),
                     iso(at-timedelta(minutes=5)), iso(at+timedelta(minutes=5)),
                     trigger_event_id=trigger_id, cohort_signature=signature,
-                    fulfillment_claims=pending)
+                    fulfillment_claims=claims)
                 db = _conn(self.db_path)
                 try:
                     db.execute('BEGIN IMMEDIATE')
@@ -2306,11 +2311,30 @@ class RecoveryService:
                                  'customer_event_users_missing': len(missing_event_users),
                                  'future_window_remaining_seconds': future_seconds,
                                  'inconclusive_accounts': inconclusive_accounts}}
-        snapshot['snapshot_hash'] = digest(snapshot)
         db = _conn(self.db_path)
         automatic_job = None
         try:
             db.execute('BEGIN IMMEDIATE')
+            if snapshot['manifest'].get('scenario') == 'live_adapty':
+                claims = []
+                for account in accounts:
+                    if account.get('status') != 'confirmed':
+                        continue
+                    row = db.execute('SELECT * FROM fulfillment_expectations WHERE source_fingerprint=? '
+                        "AND json_extract(key_json,'$.customer_id')=? "
+                        "AND json_extract(key_json,'$.transaction_id')=?",
+                        (account.get('evidence_hash'),account['id'],account.get('source_transaction_id'))).fetchone()
+                    if row:
+                        decision = (None if not row['incident_id'] else db.execute(
+                            'SELECT status FROM automatic_recovery WHERE incident_id=? '
+                            'ORDER BY attempt DESC LIMIT 1',(row['incident_id'],)).fetchone())
+                        opened = row['episode_open'] and not (decision and decision['status']=='completed')
+                        if opened and row['incident_id'] and row['incident_id'] != incident_id:
+                            account.update(status='potential',reason='owned_by_open_incident',eligible=False)
+                            continue
+                        claims.append((row,row['episode_no'] if opened else row['episode_no']+1))
+                self._bind_fulfillment_claims(db,incident_id,claims)
+            snapshot['snapshot_hash'] = digest(snapshot)
             db.execute('INSERT INTO snapshots VALUES(?,?,?,?,?,?)',
                        (snapshot_id, incident_id, snapshot['created_at'], snapshot['scenario_observed_at'],
                         snapshot['snapshot_hash'], _json(snapshot)))
@@ -2327,21 +2351,6 @@ class RecoveryService:
             current['status'] = 'scanned'
             db.execute('UPDATE incidents SET incident_json=? WHERE id=?', (_json(current), incident_id))
             if snapshot['manifest'].get('scenario') == 'live_adapty':
-                claims = []
-                for account in accounts:
-                    if account.get('status') != 'confirmed':
-                        continue
-                    row = db.execute('SELECT * FROM fulfillment_expectations WHERE source_fingerprint=? '
-                        "AND json_extract(key_json,'$.customer_id')=? "
-                        "AND json_extract(key_json,'$.transaction_id')=?",
-                        (account.get('evidence_hash'),account['id'],account.get('source_transaction_id'))).fetchone()
-                    if row:
-                        decision = (None if not row['incident_id'] else db.execute(
-                            'SELECT status FROM automatic_recovery WHERE incident_id=? '
-                            'ORDER BY attempt DESC LIMIT 1',(row['incident_id'],)).fetchone())
-                        opened = row['episode_open'] and not (decision and decision['status']=='completed')
-                        claims.append((row,row['episode_no'] if opened else row['episode_no']+1))
-                self._bind_fulfillment_claims(db,incident_id,claims)
                 self._record_fulfillment_snapshot_traces(db,incident_id,snapshot,observations)
             if (schedule_auto and self.auto_repair
                     and snapshot['manifest'].get('scenario') == 'live_adapty'):
@@ -2412,6 +2421,8 @@ class RecoveryService:
                 'user_id':user_id,'key':json.loads(row['key_json']),'version':row['version'],
                 'episode_no':row['episode_no'],'transaction_id':account.get('source_transaction_id'),
                 'source_fingerprint':account.get('evidence_hash'),'status':status,
+                'revisions': {name:account.get(name+'_revision')
+                    for name in ('identity','policy','projection','cache')},
                 'reason':account['reason'],'telemetry_gap':bool(row['telemetry_gap']),
                 'source_period':{'starts_at':row['period_start'],'expires_at':row['period_end']},
                 'next_step':('No write; source period and Lumen gate already match'
@@ -2779,11 +2790,26 @@ class RecoveryService:
             claims = []
             if manifest.get('scenario') == 'live_adapty':
                 if fulfillment_claims is not None:
+                    claimed_owners = []
                     for claim in fulfillment_claims:
                         row = db.execute('SELECT * FROM fulfillment_expectations WHERE expectation_id=?',
                             (claim['expectation_id'],)).fetchone()
                         if row and row['episode_open'] and row['episode_no'] == claim['episode_no']:
+                            if row['incident_id']:
+                                owner = db.execute('SELECT incident_json FROM incidents WHERE id=?',
+                                    (row['incident_id'],)).fetchone()
+                                if owner:
+                                    claimed_owners.append(row['incident_id'])
+                                pending_scan = db.execute("SELECT 1 FROM jobs WHERE kind IN ('incident','scan') "
+                                    "AND status IN ('queued','running') AND payload=? LIMIT 1",
+                                    (_json({'incident_id':row['incident_id']}),)).fetchone()
+                                if (not owner or json.loads(owner['incident_json']).get('first_snapshot_id')
+                                        or not pending_scan):
+                                    continue
                             claims.append((row,row['episode_no']))
+                    if not claims:
+                        db.execute('COMMIT')
+                        return (claimed_owners[0] if claimed_owners else None), None
                 elif trigger_event_id:
                     event_row = db.execute('SELECT event_json FROM collector_events WHERE event_id=?',
                         (trigger_event_id,)).fetchone()
@@ -4619,6 +4645,8 @@ class RecoveryService:
                 'reason_code': result['reason'], 'projection_version': handler_version,
                 'cache_version': config_version, 'policy_version': 'access-policy-v2',
                 'adapter_version': 'lumen-adapter-v2', 'initiator': initiator,
+                'revisions': {name:result[name+'_revision']
+                    for name in ('identity','policy','projection','cache')},
             })
         except Exception:
             # Telemetry is best effort; gate decisions must remain available.
@@ -5691,8 +5719,12 @@ class RecoveryService:
         while time.monotonic() < deadline:
             db = _conn(self.db_path)
             try:
-                incident = db.execute('SELECT id FROM incidents WHERE trigger_event_id=?',
-                                      (event_id,)).fetchone()
+                assessment = db.execute('SELECT result FROM collector_assessments WHERE event_id=?',
+                                        (event_id,)).fetchone()
+                owner = None if assessment is None else json.loads(assessment['result']).get('incident_id')
+                incident = (db.execute('SELECT id FROM incidents WHERE id=?',(owner,)).fetchone()
+                    if owner else db.execute('SELECT id FROM incidents WHERE trigger_event_id=?',
+                        (event_id,)).fetchone())
                 decision = None if not incident else db.execute(
                     'SELECT status FROM automatic_recovery WHERE incident_id=? ORDER BY attempt DESC LIMIT 1',
                     (incident['id'],)).fetchone()
@@ -5864,6 +5896,17 @@ class RecoveryService:
         try:
             if (event.get('kind') == 'feature_access_decided'
                     and details.get('decision') == 'deny'):
+                revisions = details.get('revisions')
+                if (isinstance(revisions,dict) and set(revisions)=={'identity','policy','projection','cache'}
+                        and all(type(value) is int and value>=0 for value in revisions.values())):
+                    for trace_row in db.execute('SELECT incident_id,trace_json FROM fulfillment_traces '
+                            'WHERE user_id=? AND incident_id IS NOT NULL ORDER BY updated_at DESC,trace_id',
+                            (user_id,)):
+                        trace = json.loads(trace_row['trace_json'])
+                        if (trace.get('revisions')==revisions and any(
+                                step.get('name')=='gate_readback' and step.get('result')=='denied'
+                                for step in trace.get('steps',[]))):
+                            return trace_row['incident_id']
                 row = db.execute('SELECT incident_id,episode_open FROM fulfillment_expectations '
                     "WHERE json_extract(key_json,'$.customer_id')=? "
                     'ORDER BY first_observed_at DESC,version DESC LIMIT 1', (user_id,)).fetchone()

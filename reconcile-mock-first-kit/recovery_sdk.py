@@ -240,6 +240,9 @@ def _validate_details(kind, details):
         optional_mobile = {'original_transaction_id'} | _PROJECTION_RESYNC_V2_FIELDS | {'stack'}
         if not expected <= set(details) or set(details)-(expected | optional_mobile):
             raise ValueError('Collector details do not match the event contract')
+    elif kind == 'feature_access_decided':
+        if not expected <= set(details) or set(details)-(expected | {'revisions'}):
+            raise ValueError('Collector details do not match the event contract')
     elif set(details) != expected:
         raise ValueError('Collector details do not match the event contract')
 
