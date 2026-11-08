@@ -30,6 +30,24 @@ button:focus-visible,a:focus-visible,summary:focus-visible { outline:3px solid v
 .feed-heading { display:flex; justify-content:space-between; align-items:center; gap:12px; padding:17px 18px; border-bottom:1px solid var(--border); }
 .feed-heading h2 { font:600 17px var(--font-heading); margin:0; }
 .feed-heading span { font-size:12px; color:var(--muted-foreground); }
+.filters,.export-range { display:flex; flex-wrap:wrap; align-items:end; gap:10px; padding:14px 18px; border-bottom:1px solid var(--border-subtle); }
+.filters label,.export-range label { display:grid; gap:5px; font-size:12px; color:var(--muted-foreground); }
+.filters select,.export-range input { max-width:100%; min-height:36px; border:1px solid var(--border); border-radius:7px; padding:6px 8px; color:var(--foreground); background:white; font:inherit; }
+.filters span { color:var(--muted-foreground); font-size:12px; overflow-wrap:anywhere; }
+.pager { display:flex; align-items:center; justify-content:center; gap:12px; padding:14px; border-top:1px solid var(--border-subtle); }
+.pager span { font-size:12px; color:var(--muted-foreground); }
+.activity-feed { margin-top:18px; padding-bottom:12px; }
+.stages { display:flex; flex-wrap:wrap; gap:8px 24px; margin:14px 18px; padding-left:20px; }
+.stages li { color:var(--muted-foreground); font-size:12px; }
+.stages li.complete { color:#13785d; }
+.fulfillment { padding:12px 18px; border-top:1px solid var(--border-subtle); overflow-wrap:anywhere; }
+.fulfillment > span { margin-left:10px; color:var(--muted-foreground); font-size:12px; }
+.fulfillment .stages { margin:8px 0; }
+.fulfillment p,.trace-list p { margin:5px 0; font-size:12px; color:var(--muted-foreground); }
+.export-range { margin:18px 0; border:1px solid var(--border); border-radius:10px; background:white; }
+.export-range h2 { flex-basis:100%; font:600 17px var(--font-heading); margin:0; }
+.trace-list { padding-left:20px; }
+.incident .trace-account > summary { display:block; padding:10px 0; overflow-wrap:anywhere; }
 .column-head,.incident summary { display:grid; grid-template-columns:minmax(180px,2fr) minmax(65px,.5fr) minmax(120px,1fr) minmax(150px,1.2fr) minmax(95px,.7fr); gap:14px; align-items:center; padding:13px 18px; }
 .column-head { background:var(--surface-sunken); font-size:11px; color:var(--muted-foreground); font-weight:600; }
 .incident { border-top:1px solid var(--border-subtle); }
@@ -76,6 +94,8 @@ button:focus-visible,a:focus-visible,summary:focus-visible { outline:3px solid v
   .intro h1 { font-size:27px; }
   .controls { width:100%; }
   .controls > * { flex:1; }
+  .export-range > * { flex:1 1 100%; }
+  .export-range input { width:100%; }
   .summaries { gap:7px; margin:18px 0; }
   .summaries article { padding:12px 10px; }
   .summaries b { font-size:19px; }

@@ -1,24 +1,35 @@
-import { csv, renderMonitor } from './monitor-view.js';
+import { renderMonitor } from './monitor-view.js';
 
 const root = document.querySelector('#app');
 const liveRegion = document.createElement('div');
 liveRegion.className = 'visually-hidden'; liveRegion.setAttribute('role','status'); liveRegion.setAttribute('aria-live','polite'); document.body.append(liveRegion);
-let data = null, pollError = '', actionError = '', pending = false, accepted = false, acceptedAction = '', statusMessage = '', lastSummary = null, timer = null, controller = null, alive = true, actionFocus = null;
+let data = null, pollError = '', actionError = '', pending = false, accepted = false, acceptedAction = '', statusMessage = '', lastSummary = null, timer = null, controller = null, alive = true, actionFocus = null, filterStatus = 'unresolved', cursor = 0, page = 0, cursorHistory = [0], fulfillments = [], traces = {}, rangeEdited = false, range = {from:'',to:''};
 const path = '/api/recovery/monitor';
-const focusKey = element => element?.dataset?.action ? {action:element.dataset.action} : element?.closest?.('.incident') ? {incident:element.closest('.incident').dataset.incident} : element?.closest?.('.integration') ? {integration:true} : null;
+const focusKey = element => element?.tagName === 'BUTTON' && element.closest?.('[data-form="filters"]') ? {filterSubmit:true} : element?.dataset?.action ? {action:element.dataset.action,id:element.dataset.id} : element?.name ? {name:element.name,form:element.closest?.('form')?.dataset?.form} : element?.closest?.('.trace-account') ? {trace:detailsKey(element.closest('.trace-account'))} : element?.closest?.('.incident') ? {incident:element.closest('.incident').dataset.incident} : element?.closest?.('.integration') ? {integration:element.closest('.activity-feed') ? 'observations' : 'integration'} : null;
+const detailsKey = el => el.dataset.incident ?? (el.classList?.contains('trace-account') ? `trace:${el.closest('.incident')?.dataset.incident}:${el.querySelector('summary')?.textContent}` : el.closest('.activity-feed') ? 'observations' : 'integration');
+function readRange() { for (const input of root.querySelectorAll('input[name]')) range[input.name] = input.value; }
+function defaultRange() { return {from:new Date(Date.now()-86400000).toISOString().slice(0,19),to:new Date(Date.now()+1000).toISOString().slice(0,19)}; }
 
 function render() {
-  const open = new Set([...root.querySelectorAll('details[open]')].map(el => el.dataset.incident ?? (el.classList.contains('integration') ? 'integration' : '')));
+  if (document.activeElement?.matches?.('[data-form="export"] input') && !pending) return;
+  const open = new Set([...root.querySelectorAll('details[open]')].map(detailsKey));
   const active = focusKey(document.activeElement) || actionFocus;
+  if (rangeEdited) readRange(); else range = defaultRange();
   const requestMessage = pending ? 'Request pending · waiting for the monitor response.' : accepted ? acceptedAction === 'stop' ? 'Stop accepted · waiting for the monitor to confirm.' : 'Request accepted · waiting for the monitor to confirm.' : '';
-  root.innerHTML = renderMonitor(data, {pollError, actionError, pending, requestMessage});
-  for (const el of root.querySelectorAll('details')) if (open.has(el.dataset.incident ?? (el.classList.contains('integration') ? 'integration' : ''))) el.open = true;
+  root.innerHTML = renderMonitor(data, {pollError, actionError, pending, requestMessage, status:filterStatus, fulfillments, traces, range, page});
+  for (const el of root.querySelectorAll('details')) if (open.has(detailsKey(el))) el.open = true;
   if (active?.action) {
-    const action = ['start','stop'].includes(active.action) ? (data?.simulation?.status === 'running' ? 'stop' : 'start') : active.action;
-    root.querySelector(`[data-action="${action}"]`)?.focus({preventScroll:true});
+    if (active.action === 'trace') [...root.querySelectorAll('[data-action="trace"]')].find(el => el.dataset.id === active.id)?.focus({preventScroll:true});
+    else {
+      const action = ['start','stop','continuous','bootstrap'].includes(active.action) ? (data?.simulation?.status === 'running' ? 'stop' : data?.simulation?.bootstrap_required ? 'bootstrap' : data?.simulation?.bootstrap_status === 'not_required' ? 'start' : 'continuous') : active.action;
+      root.querySelector(`[data-action="${action}"]`)?.focus({preventScroll:true});
+    }
   }
+  else if (active?.filterSubmit) root.querySelector('[data-form="filters"] button')?.focus({preventScroll:true});
+  else if (active?.trace) [...root.querySelectorAll('.trace-account')].find(el => detailsKey(el) === active.trace)?.querySelector('summary')?.focus({preventScroll:true});
   else if (active?.incident) [...root.querySelectorAll('.incident')].find(el => el.dataset.incident === active.incident)?.querySelector('summary')?.focus({preventScroll:true});
-  else if (active?.integration) root.querySelector('.integration summary')?.focus({preventScroll:true});
+  else if (active?.integration) [...root.querySelectorAll('details')].find(el => detailsKey(el) === active.integration)?.querySelector('summary')?.focus({preventScroll:true});
+  else if (active?.name) root.querySelector(`[data-form="${active.form}"] [name="${active.name}"]`)?.focus({preventScroll:true});
   if (!pending) actionFocus = null;
 }
 
@@ -40,7 +51,12 @@ async function request(url, options = {}) {
 async function refresh() {
   if (!alive || document.hidden || pending || controller) return;
   try {
-    data = await request(path); pollError = '';
+    const status = filterStatus === 'unresolved' ? 'needs_attention' : filterStatus;
+    data = await request(`${path}?cursor=${encodeURIComponent(cursor)}&limit=50&status=${encodeURIComponent(status)}`); pollError = '';
+    if (data.pagination?.next_cursor == null && cursor > 0 && !(data.incidents || []).length) { cursor = 0; page = 0; cursorHistory = [0]; }
+    if (['LIVE_ADAPTY_SEEDED','LOCAL_ADAPTY_FIXTURE'].includes(data.mode) && data.automation?.enabled === true) {
+      const activity = await request('/api/recovery/fulfillments?cursor=0&limit=50'); fulfillments = activity.items || [];
+    } else fulfillments = [];
     if (accepted && (acceptedAction === 'stop' ? data.simulation?.status !== 'running' : data.simulation?.status !== 'idle')) accepted = false;
     announce(data);
   }
@@ -63,21 +79,34 @@ function announce(feed) {
 }
 
 async function download(kind) {
-  const rows = data?.incidents;
-  if (!rows?.length) return;
-  const date = new Date().toISOString().slice(0,10);
-  const content = kind === 'csv' ? csv(rows) : JSON.stringify({mode:data.mode,app:data.app,automation:data.automation,connection:data.connection,summary:data.summary,telemetry:data.telemetry,simulation:data.simulation,incidents:rows}, null, 2);
-  const blob = new Blob([content], {type:kind === 'csv' ? 'text/csv;charset=utf-8' : 'application/json'});
-  const url = URL.createObjectURL(blob), link = document.createElement('a'); link.href = url; link.download = `reconcile-incidents-${date}.${kind}`; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
+  readRange();
+  if (rangeEdited) readRange(); else range = defaultRange();
+  const from = range.from, to = range.to;
+  const start = new Date(`${from}Z`), end = new Date(`${to}Z`);
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime()) || start >= end) { actionError = 'Choose a valid UTC range where From is earlier than To.'; render(); return; }
+  try {
+    const response = await fetch(`/api/recovery/export?from=${encodeURIComponent(start.toISOString())}&to=${encodeURIComponent(end.toISOString())}&format=${kind}`, {cache:'no-store'});
+    if (!response.ok) { const body = await response.json().catch(()=>({})); throw new Error(body.error || body.message || `Export failed (${response.status})`); }
+    const blob = new Blob([await response.text()], {type:kind === 'csv' ? 'text/csv;charset=utf-8' : 'application/json'});
+    const url = URL.createObjectURL(blob), link = document.createElement('a'); link.href = url; link.download = `reconcile-activity.${kind}`; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
+    actionError = '';
+  } catch (e) { actionError = e.message || 'Export failed.'; }
 }
 
 root.addEventListener('click', async event => {
   const button = event.target.closest('[data-action]');
   if (!button) return;
   if (button.dataset.action === 'dismiss-error') { actionError = ''; render(); return; }
-  if (button.dataset.action === 'csv' || button.dataset.action === 'json') { await download(button.dataset.action === 'csv' ? 'csv' : 'json'); render(); return; }
+  if (button.dataset.action === 'csv' || button.dataset.action === 'json') { event.preventDefault?.(); await download(button.dataset.action === 'csv' ? 'csv' : 'json'); render(); return; }
   if (button.dataset.action === 'refresh') { await refresh(); return; }
-  const action = ({start:'start', once:'once', stop:'stop'})[button.dataset.action];
+  if (button.dataset.action === 'page') {
+    const target = Number(button.dataset.page);
+    if (target < page) { cursorHistory = cursorHistory.slice(0, target + 1); cursor = cursorHistory[target] ?? 0; }
+    else { cursor = data?.pagination?.next_cursor ?? cursor; cursorHistory[target] = cursor; }
+    page = target; await refresh(); return;
+  }
+  if (button.dataset.action === 'trace') { const id = button.dataset.id; actionFocus = {action:'trace',id}; try { traces[id] = {...await request(`/api/recovery/incidents/${encodeURIComponent(id)}/trace`),_loaded_at:new Date().toISOString()}; render(); } catch (e) { actionError = e.message || 'Could not load activity.'; render(); } return; }
+  const action = ({start:'start', bootstrap:'bootstrap', continuous:'continuous', once:'once', stop:'stop'})[button.dataset.action];
   if (!action || pending) return;
   pending = true; accepted = false; actionError = '';
   actionFocus = {action:button.dataset.action};
@@ -89,6 +118,15 @@ root.addEventListener('click', async event => {
   } catch (e) { if (e.name !== 'AbortError' && alive) actionError = e.message || 'Simulation request failed.'; }
   pending = false;
   if (alive && !document.hidden) { await refresh(); render(); }
+});
+
+root.addEventListener('submit', async event => {
+  const form = event.target.closest?.('[data-form]'); if (!form) return;
+  event.preventDefault();
+  if (form.dataset.form === 'filters') { filterStatus = form.elements.status.value; cursor = 0; page = 0; await refresh(); }
+});
+root.addEventListener('input', event => {
+  if (event.target.closest?.('[data-form="export"]')) { rangeEdited = true; readRange(); }
 });
 
 document.addEventListener('visibilitychange', () => { clearTimeout(timer); if (document.hidden) controller?.abort(); else refresh(); });
