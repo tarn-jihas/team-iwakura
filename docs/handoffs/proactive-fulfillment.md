@@ -5,7 +5,7 @@ Request: implement the accepted replacement plan,2026-11-07/08. Baseline
 engine`a509c4f`, UI`984bebd`, fast trace/receipt fix`be546f4`,
 late-denial/atomic cohort fixes`8757a30`.
 Test harness checkpoint:`30a394a`; contract/live guide checkpoint:`c78de7d`.
-Final verification and pilot documents are ready for the closing local commit.
+Final verification and pilot documents are recorded in`796b214`.
 Node22.22.3/Python3.13.13/CLI0.18.0.
 Ponytail Full; no new dependencies, worktrees, remote writes, reseeding, push or
 deployment. User runtimes8765/56302/8876 and their history remain untouched.
@@ -84,8 +84,8 @@ Keep512MiB guard and source cadence unchanged. The aggregate does not prove
 1000incidents fit one runtime.
 
 Implementation and required verification are complete. Root reviewed the remaining
-test and documentation diffs. Closing local documentation commit remains; no push
-or deployment. Ranked next work is in`docs/AUTOMATIC_RECOVERY.md`: authenticated
+test and documentation diffs. No required work remains; no push or deployment.
+Ranked next work is in`docs/AUTOMATIC_RECOVERY.md`: authenticated
 source updates/backfill, native/store sandbox integration, evidence deduplication
 and streaming exports, then pilot metrics/pricing.
 Private Adapty config remains ignored; never print keys. Known limits: real store
