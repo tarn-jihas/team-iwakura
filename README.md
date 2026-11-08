@@ -1,5 +1,7 @@
 # Reconcile · local hackathon demo
 
+[AI Usage & Development Log](docs/AI_USAGE_DEVELOPMENT_LOG.md)
+
 ## TypeScript migration in progress
 
 The isolated TypeScript/Preact runtime is available for development with Node
@@ -51,15 +53,22 @@ The implementation toolchain is Python 3.13.13 and Node 22.22.3. Python uses onl
 the standard library; Node runs the JavaScript tests.
 
 ```sh
-cd /Users/strahinja/Documents/personal/reconcile
 npm start -- --port 8875
 ```
 
 Open [http://127.0.0.1:8875](http://127.0.0.1:8875). Stop with Ctrl+C. The launcher
 starts provider/Adapty, Lumen and engine processes with separate SQLite state.
-Startup preserves existing recovery state. **Advanced tools → Demo Lab → Reset** explicitly resets
-only this new scenario. Use `--runtime /tmp/reconcile-demo-example` for an isolated
-run. The example port leaves an existing demo on 8765 untouched.
+Recovery is automatic: press **Run** and a customer is denied at the Lumen gate,
+the signed SDK event opens an incident, the policy approves a bounded repair and
+the same gate is checked again. Each run keeps its history in the **Live feed**;
+a repair that cannot be verified moves to **Needs attention** with the step and
+accounts where it stopped. Every incident shows a readable step-by-step trace.
+
+When the private read-only config `reconcile-mock-first-kit/runtime/live-adapty/live-config.json`
+exists, `npm start` runs the live Adapty mode instead (see the live guide below).
+`--mock` forces the synthetic mock; `--manual` keeps the approval-gated console.
+Use `--runtime /tmp/reconcile-demo-example` for an isolated run. Demo Lab (reset,
+clock and faults) remains at `/recovery-console.html#lab`.
 
 Analytics and cancellation regression demos remain in Demo Lab. The standalone
 legacy server is available through `npm run start:legacy`. `npm run seed` resets
