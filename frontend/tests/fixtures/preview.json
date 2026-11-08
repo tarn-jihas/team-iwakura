@@ -1,0 +1,125 @@
+{
+    "run": "mock-run-20261107",
+    "mode": "FULL_MOCK",
+    "groups": [
+        {
+            "class": "DUPLICATE_IN_MIXPANEL",
+            "action": "post_correction",
+            "finding_ids": [
+                "DUPLICATE_IN_MIXPANEL|txn_duplicate|purchase|u00003|Production|USD|mock-run-20261107|mock-lumen"
+            ],
+            "expected_signed_gap_change": {
+                "USD": "-12.99"
+            },
+            "approval_hash": "6d4008338493321af420e72a07dcbcffdfd73edbc0eba603126038a54ce3a7cf",
+            "group_hash": "6d4008338493321af420e72a07dcbcffdfd73edbc0eba603126038a54ce3a7cf",
+            "evidence_hash": "9383f03885220447c0df976268ea9861c7b9277fc8eeb9bc036f3bd895b2a1d7",
+            "row_count": 1,
+            "payloads": [
+                {
+                    "event": "reconcile_correction",
+                    "properties": {
+                        "distinct_id": "u00003",
+                        "time": 1794043000,
+                        "$insert_id": "8ae48e94-2a2a-5f56-94c5-c1d77f20f6f7",
+                        "transaction_id": "txn_duplicate",
+                        "original_transaction_id": "txn_duplicate",
+                        "currency": "USD",
+                        "price_local": "-12.99",
+                        "environment": "Production",
+                        "store": "play_store",
+                        "reconcile_run_id": "mock-run-20261107",
+                        "corrects_class": "DUPLICATE_IN_MIXPANEL",
+                        "corrects_event_class": "purchase",
+                        "reason": "synthetic approved correction"
+                    }
+                }
+            ],
+            "source_data": "synthetic"
+        },
+        {
+            "class": "MISSING_IN_MIXPANEL",
+            "action": "backfill_mixpanel",
+            "finding_ids": [
+                "MISSING_IN_MIXPANEL|txn_missing_purchase|purchase|u00001|Production|USD|mock-run-20261107|mock-lumen",
+                "MISSING_IN_MIXPANEL|txn_missing_refund|refund|u00002|Production|USD|mock-run-20261107|mock-lumen"
+            ],
+            "expected_signed_gap_change": {
+                "USD": "3.00"
+            },
+            "approval_hash": "68cc6ecb9ce03ccc663895a7811d329653c95c65de43d21f0ff023141337ea2b",
+            "group_hash": "68cc6ecb9ce03ccc663895a7811d329653c95c65de43d21f0ff023141337ea2b",
+            "evidence_hash": "1bcd36f753e940a9b11ad33c56ff750ca4876c4047bec301123094f07b1b0589",
+            "row_count": 2,
+            "payloads": [
+                {
+                    "event": "subscription_started",
+                    "properties": {
+                        "distinct_id": "u00001",
+                        "time": 1794043000,
+                        "$insert_id": "5fe8c34e-059c-5cdd-86ae-d075f4bb56eb",
+                        "transaction_id": "txn_missing_purchase",
+                        "original_transaction_id": "txn_missing_purchase",
+                        "currency": "USD",
+                        "price_local": "9.99",
+                        "environment": "Production",
+                        "store": "play_store",
+                        "reconcile_run_id": "mock-run-20261107"
+                    }
+                },
+                {
+                    "event": "subscription_refunded",
+                    "properties": {
+                        "distinct_id": "u00002",
+                        "time": 1794043000,
+                        "$insert_id": "e21d71fb-7e78-54b8-8af1-836c936bc212",
+                        "transaction_id": "txn_missing_refund",
+                        "original_transaction_id": "txn_missing_refund",
+                        "currency": "USD",
+                        "price_local": "-6.99",
+                        "environment": "Production",
+                        "store": "play_store",
+                        "reconcile_run_id": "mock-run-20261107"
+                    }
+                }
+            ],
+            "source_data": "synthetic"
+        },
+        {
+            "class": "PRICE_MISMATCH",
+            "action": "post_correction",
+            "finding_ids": [
+                "PRICE_MISMATCH|txn_price|purchase|u00004|Production|EUR|mock-run-20261107|mock-lumen"
+            ],
+            "expected_signed_gap_change": {
+                "EUR": "-989.01"
+            },
+            "approval_hash": "948b04efab5e74b0c256988a2bdd642f281189aaeb41da2510e424de95616d1e",
+            "group_hash": "948b04efab5e74b0c256988a2bdd642f281189aaeb41da2510e424de95616d1e",
+            "evidence_hash": "fed041d2c66e9e9e80b4e2e58c4710b162305d5b0ae0d027b8d52fbd7ee51bce",
+            "row_count": 1,
+            "payloads": [
+                {
+                    "event": "reconcile_correction",
+                    "properties": {
+                        "distinct_id": "u00004",
+                        "time": 1794043000,
+                        "$insert_id": "405f1a10-d747-5232-8314-c32b28778d74",
+                        "transaction_id": "txn_price",
+                        "original_transaction_id": "txn_price",
+                        "currency": "EUR",
+                        "price_local": "-989.01",
+                        "environment": "Production",
+                        "store": "play_store",
+                        "reconcile_run_id": "mock-run-20261107",
+                        "corrects_class": "PRICE_MISMATCH",
+                        "corrects_event_class": "purchase",
+                        "reason": "synthetic approved correction"
+                    }
+                }
+            ],
+            "source_data": "synthetic"
+        }
+    ],
+    "notes": "Preview is deterministic and cannot call any real provider"
+}

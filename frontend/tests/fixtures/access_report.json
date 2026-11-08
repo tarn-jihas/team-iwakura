@@ -1,0 +1,1763 @@
+{
+    "mode": "FULL_MOCK",
+    "manifest": {
+        "run_id": "mock-lumen-access-20261103-v0",
+        "app": "mock-lumen-access",
+        "environment": "Production",
+        "scenario_now": "2026-11-03T00:12:04Z",
+        "policy_version": "access-policy-v1",
+        "adapter_version": "lumen-adapter-v1",
+        "provenance": "synthetic reconstruction from the supplied incident document; no downloaded or live source ledger",
+        "logical_now": "2026-11-03T00:12:04Z",
+        "time_basis": "deterministic scenario clock; demo advance changes logical_now"
+    },
+    "consumer": {
+        "mode": "faulty",
+        "handler_version": "cancel-handler-v1"
+    },
+    "incident": {
+        "id": null,
+        "window_start": "2026-11-03T00:05:00Z",
+        "window_end": "2026-11-03T00:10:00Z",
+        "event_type": "subscription_renewal_cancelled",
+        "handler_version": "cancel-handler-v1",
+        "feature": "premium_export"
+    },
+    "summary": {
+        "in_scope": 100,
+        "evaluated": 0,
+        "confirmed": 0,
+        "healthy": 0,
+        "legitimate_denial": 0,
+        "policy_denial": 0,
+        "inconclusive": 0,
+        "restored": 0,
+        "unresolved": 0,
+        "pending_verification": 0
+    },
+    "recovery": {
+        "target_count": 0,
+        "verified_count": 0,
+        "unresolved_count": 0,
+        "root_cause_status": "pending",
+        "latest_plan_id": null,
+        "unresolved_ids": []
+    },
+    "accounts": [
+        {
+            "id": "u00000",
+            "status": "outside_incident",
+            "reason": "detection_required",
+            "source_active": true,
+            "source_expires_at": "2027-08-04T00:00:00Z",
+            "source_freshness": "fresh",
+            "gate": {
+                "allowed": false,
+                "reason": "subscription_inactive",
+                "projection_revision": 2,
+                "cache_revision": 2
+            },
+            "observed_customer_denial": false,
+            "candidate": false,
+            "eligible": false
+        },
+        {
+            "id": "u00295",
+            "status": "outside_incident",
+            "reason": "detection_required",
+            "source_active": true,
+            "source_expires_at": "2027-08-04T00:00:00Z",
+            "source_freshness": "fresh",
+            "gate": {
+                "allowed": false,
+                "reason": "subscription_inactive",
+                "projection_revision": 2,
+                "cache_revision": 2
+            },
+            "observed_customer_denial": false,
+            "candidate": false,
+            "eligible": false
+        },
+        {
+            "id": "u00308",
+            "status": "outside_incident",
+            "reason": "detection_required",
+            "source_active": true,
+            "source_expires_at": "2027-08-04T00:00:00Z",
+            "source_freshness": "fresh",
+            "gate": {
+                "allowed": false,
+                "reason": "subscription_inactive",
+                "projection_revision": 2,
+                "cache_revision": 2
+            },
+            "observed_customer_denial": false,
+            "candidate": false,
+            "eligible": false
+        },
+        {
+            "id": "u00315",
+            "status": "outside_incident",
+            "reason": "detection_required",
+            "source_active": true,
+            "source_expires_at": "2027-08-04T00:00:00Z",
+            "source_freshness": "fresh",
+            "gate": {
+                "allowed": false,
+                "reason": "subscription_inactive",
+                "projection_revision": 2,
+                "cache_revision": 2
+            },
+            "observed_customer_denial": false,
+            "candidate": false,
+            "eligible": false
+        },
+        {
+            "id": "u00348",
+            "status": "outside_incident",
+            "reason": "detection_required",
+            "source_active": true,
+            "source_expires_at": "2027-08-04T00:00:00Z",
+            "source_freshness": "fresh",
+            "gate": {
+                "allowed": false,
+                "reason": "subscription_inactive",
+                "projection_revision": 2,
+                "cache_revision": 2
+            },
+            "observed_customer_denial": false,
+            "candidate": false,
+            "eligible": false
+        },
+        {
+            "id": "u00420",
+            "status": "outside_incident",
+            "reason": "detection_required",
+            "source_active": true,
+            "source_expires_at": "2027-08-04T00:00:00Z",
+            "source_freshness": "fresh",
+            "gate": {
+                "allowed": false,
+                "reason": "subscription_inactive",
+                "projection_revision": 2,
+                "cache_revision": 2
+            },
+            "observed_customer_denial": false,
+            "candidate": false,
+            "eligible": false
+        },
+        {
+            "id": "u00426",
+            "status": "outside_incident",
+            "reason": "detection_required",
+            "source_active": true,
+            "source_expires_at": "2027-08-04T00:00:00Z",
+            "source_freshness": "fresh",
+            "gate": {
+                "allowed": false,
+                "reason": "subscription_inactive",
+                "projection_revision": 2,
+                "cache_revision": 2
+            },
+            "observed_customer_denial": false,
+            "candidate": false,
+            "eligible": false
+        },
+        {
+            "id": "u00436",
+            "status": "outside_incident",
+            "reason": "detection_required",
+            "source_active": true,
+            "source_expires_at": "2027-08-04T00:00:00Z",
+            "source_freshness": "fresh",
+            "gate": {
+                "allowed": false,
+                "reason": "subscription_inactive",
+                "projection_revision": 2,
+                "cache_revision": 2
+            },
+            "observed_customer_denial": false,
+            "candidate": false,
+            "eligible": false
+        },
+        {
+            "id": "u00591",
+            "status": "outside_incident",
+            "reason": "detection_required",
+            "source_active": true,
+            "source_expires_at": "2027-08-04T00:00:00Z",
+            "source_freshness": "fresh",
+            "gate": {
+                "allowed": false,
+                "reason": "subscription_inactive",
+                "projection_revision": 2,
+                "cache_revision": 2
+            },
+            "observed_customer_denial": false,
+            "candidate": false,
+            "eligible": false
+        },
+        {
+            "id": "u00663",
+            "status": "outside_incident",
+            "reason": "detection_required",
+            "source_active": true,
+            "source_expires_at": "2027-08-04T00:00:00Z",
+            "source_freshness": "fresh",
+            "gate": {
+                "allowed": false,
+                "reason": "subscription_inactive",
+                "projection_revision": 2,
+                "cache_revision": 2
+            },
+            "observed_customer_denial": false,
+            "candidate": false,
+            "eligible": false
+        },
+        {
+            "id": "u00773",
+            "status": "outside_incident",
+            "reason": "detection_required",
+            "source_active": true,
+            "source_expires_at": "2027-08-04T00:00:00Z",
+            "source_freshness": "fresh",
+            "gate": {
+                "allowed": false,
+                "reason": "subscription_inactive",
+                "projection_revision": 2,
+                "cache_revision": 2
+            },
+            "observed_customer_denial": false,
+            "candidate": false,
+            "eligible": false
+        },
+        {
+            "id": "u00798",
+            "status": "outside_incident",
+            "reason": "detection_required",
+            "source_active": true,
+            "source_expires_at": "2027-08-04T00:00:00Z",
+            "source_freshness": "fresh",
+            "gate": {
+                "allowed": false,
+                "reason": "subscription_inactive",
+                "projection_revision": 2,
+                "cache_revision": 2
+            },
+            "observed_customer_denial": false,
+            "candidate": false,
+            "eligible": false
+        },
+        {
+            "id": "u00950",
+            "status": "outside_incident",
+            "reason": "detection_required",
+            "source_active": true,
+            "source_expires_at": "2027-08-04T00:00:00Z",
+            "source_freshness": "fresh",
+            "gate": {
+                "allowed": false,
+                "reason": "subscription_inactive",
+                "projection_revision": 2,
+                "cache_revision": 2
+            },
+            "observed_customer_denial": false,
+            "candidate": false,
+            "eligible": false
+        },
+        {
+            "id": "u00998",
+            "status": "outside_incident",
+            "reason": "detection_required",
+            "source_active": true,
+            "source_expires_at": "2027-08-04T00:00:00Z",
+            "source_freshness": "fresh",
+            "gate": {
+                "allowed": false,
+                "reason": "subscription_inactive",
+                "projection_revision": 2,
+                "cache_revision": 2
+            },
+            "observed_customer_denial": false,
+            "candidate": false,
+            "eligible": false
+        },
+        {
+            "id": "u01029",
+            "status": "outside_incident",
+            "reason": "detection_required",
+            "source_active": true,
+            "source_expires_at": "2027-08-04T00:00:00Z",
+            "source_freshness": "fresh",
+            "gate": {
+                "allowed": false,
+                "reason": "subscription_inactive",
+                "projection_revision": 2,
+                "cache_revision": 2
+            },
+            "observed_customer_denial": false,
+            "candidate": false,
+            "eligible": false
+        },
+        {
+            "id": "u01064",
+            "status": "outside_incident",
+            "reason": "detection_required",
+            "source_active": true,
+            "source_expires_at": "2027-08-04T00:00:00Z",
+            "source_freshness": "fresh",
+            "gate": {
+                "allowed": false,
+                "reason": "subscription_inactive",
+                "projection_revision": 2,
+                "cache_revision": 2
+            },
+            "observed_customer_denial": false,
+            "candidate": false,
+            "eligible": false
+        },
+        {
+            "id": "u01078",
+            "status": "outside_incident",
+            "reason": "detection_required",
+            "source_active": true,
+            "source_expires_at": "2027-08-04T00:00:00Z",
+            "source_freshness": "fresh",
+            "gate": {
+                "allowed": false,
+                "reason": "subscription_inactive",
+                "projection_revision": 2,
+                "cache_revision": 2
+            },
+            "observed_customer_denial": false,
+            "candidate": false,
+            "eligible": false
+        },
+        {
+            "id": "u01217",
+            "status": "outside_incident",
+            "reason": "detection_required",
+            "source_active": true,
+            "source_expires_at": "2027-08-04T00:00:00Z",
+            "source_freshness": "fresh",
+            "gate": {
+                "allowed": false,
+                "reason": "subscription_inactive",
+                "projection_revision": 2,
+                "cache_revision": 2
+            },
+            "observed_customer_denial": false,
+            "candidate": false,
+            "eligible": false
+        },
+        {
+            "id": "u01223",
+            "status": "outside_incident",
+            "reason": "detection_required",
+            "source_active": true,
+            "source_expires_at": "2027-08-04T00:00:00Z",
+            "source_freshness": "fresh",
+            "gate": {
+                "allowed": false,
+                "reason": "subscription_inactive",
+                "projection_revision": 2,
+                "cache_revision": 2
+            },
+            "observed_customer_denial": false,
+            "candidate": false,
+            "eligible": false
+        },
+        {
+            "id": "u01224",
+            "status": "outside_incident",
+            "reason": "detection_required",
+            "source_active": true,
+            "source_expires_at": "2027-08-04T00:00:00Z",
+            "source_freshness": "fresh",
+            "gate": {
+                "allowed": false,
+                "reason": "subscription_inactive",
+                "projection_revision": 2,
+                "cache_revision": 2
+            },
+            "observed_customer_denial": false,
+            "candidate": false,
+            "eligible": false
+        },
+        {
+            "id": "u01238",
+            "status": "outside_incident",
+            "reason": "detection_required",
+            "source_active": true,
+            "source_expires_at": "2027-08-04T00:00:00Z",
+            "source_freshness": "fresh",
+            "gate": {
+                "allowed": false,
+                "reason": "subscription_inactive",
+                "projection_revision": 2,
+                "cache_revision": 2
+            },
+            "observed_customer_denial": false,
+            "candidate": false,
+            "eligible": false
+        },
+        {
+            "id": "u01256",
+            "status": "outside_incident",
+            "reason": "detection_required",
+            "source_active": true,
+            "source_expires_at": "2027-08-04T00:00:00Z",
+            "source_freshness": "fresh",
+            "gate": {
+                "allowed": false,
+                "reason": "subscription_inactive",
+                "projection_revision": 2,
+                "cache_revision": 2
+            },
+            "observed_customer_denial": false,
+            "candidate": false,
+            "eligible": false
+        },
+        {
+            "id": "u01367",
+            "status": "outside_incident",
+            "reason": "detection_required",
+            "source_active": true,
+            "source_expires_at": "2027-08-04T00:00:00Z",
+            "source_freshness": "fresh",
+            "gate": {
+                "allowed": false,
+                "reason": "subscription_inactive",
+                "projection_revision": 2,
+                "cache_revision": 2
+            },
+            "observed_customer_denial": false,
+            "candidate": false,
+            "eligible": false
+        },
+        {
+            "id": "u01459",
+            "status": "outside_incident",
+            "reason": "detection_required",
+            "source_active": true,
+            "source_expires_at": "2027-08-04T00:00:00Z",
+            "source_freshness": "fresh",
+            "gate": {
+                "allowed": false,
+                "reason": "subscription_inactive",
+                "projection_revision": 2,
+                "cache_revision": 2
+            },
+            "observed_customer_denial": false,
+            "candidate": false,
+            "eligible": false
+        },
+        {
+            "id": "u02000",
+            "status": "outside_incident",
+            "reason": "detection_required",
+            "source_active": false,
+            "source_expires_at": "2026-11-02T00:00:00Z",
+            "source_freshness": "fresh",
+            "gate": {
+                "allowed": false,
+                "reason": "subscription_expired",
+                "projection_revision": 1,
+                "cache_revision": 1
+            },
+            "observed_customer_denial": false,
+            "candidate": false,
+            "eligible": false
+        },
+        {
+            "id": "u02001",
+            "status": "outside_incident",
+            "reason": "detection_required",
+            "source_active": false,
+            "source_expires_at": "2026-11-02T00:00:00Z",
+            "source_freshness": "fresh",
+            "gate": {
+                "allowed": false,
+                "reason": "subscription_expired",
+                "projection_revision": 1,
+                "cache_revision": 1
+            },
+            "observed_customer_denial": false,
+            "candidate": false,
+            "eligible": false
+        },
+        {
+            "id": "u02002",
+            "status": "outside_incident",
+            "reason": "detection_required",
+            "source_active": false,
+            "source_expires_at": "2026-11-02T00:00:00Z",
+            "source_freshness": "fresh",
+            "gate": {
+                "allowed": false,
+                "reason": "subscription_expired",
+                "projection_revision": 1,
+                "cache_revision": 1
+            },
+            "observed_customer_denial": false,
+            "candidate": false,
+            "eligible": false
+        },
+        {
+            "id": "u02003",
+            "status": "outside_incident",
+            "reason": "detection_required",
+            "source_active": false,
+            "source_expires_at": "2026-11-02T00:00:00Z",
+            "source_freshness": "fresh",
+            "gate": {
+                "allowed": false,
+                "reason": "subscription_expired",
+                "projection_revision": 1,
+                "cache_revision": 1
+            },
+            "observed_customer_denial": false,
+            "candidate": false,
+            "eligible": false
+        },
+        {
+            "id": "u02004",
+            "status": "outside_incident",
+            "reason": "detection_required",
+            "source_active": false,
+            "source_expires_at": "2026-11-02T00:00:00Z",
+            "source_freshness": "fresh",
+            "gate": {
+                "allowed": false,
+                "reason": "subscription_expired",
+                "projection_revision": 1,
+                "cache_revision": 1
+            },
+            "observed_customer_denial": false,
+            "candidate": false,
+            "eligible": false
+        },
+        {
+            "id": "u02005",
+            "status": "outside_incident",
+            "reason": "detection_required",
+            "source_active": false,
+            "source_expires_at": "2026-11-02T00:00:00Z",
+            "source_freshness": "fresh",
+            "gate": {
+                "allowed": false,
+                "reason": "subscription_expired",
+                "projection_revision": 1,
+                "cache_revision": 1
+            },
+            "observed_customer_denial": false,
+            "candidate": false,
+            "eligible": false
+        },
+        {
+            "id": "u02006",
+            "status": "outside_incident",
+            "reason": "detection_required",
+            "source_active": true,
+            "source_expires_at": "2027-08-04T00:00:00Z",
+            "source_freshness": "fresh",
+            "gate": {
+                "allowed": false,
+                "reason": "policy_restricted",
+                "projection_revision": 1,
+                "cache_revision": 1
+            },
+            "observed_customer_denial": false,
+            "candidate": false,
+            "eligible": false
+        },
+        {
+            "id": "u02007",
+            "status": "outside_incident",
+            "reason": "detection_required",
+            "source_active": true,
+            "source_expires_at": "2027-08-04T00:00:00Z",
+            "source_freshness": "fresh",
+            "gate": {
+                "allowed": false,
+                "reason": "policy_restricted",
+                "projection_revision": 1,
+                "cache_revision": 1
+            },
+            "observed_customer_denial": false,
+            "candidate": false,
+            "eligible": false
+        },
+        {
+            "id": "u02008",
+            "status": "outside_incident",
+            "reason": "detection_required",
+            "source_active": true,
+            "source_expires_at": "2027-08-04T00:00:00Z",
+            "source_freshness": "fresh",
+            "gate": {
+                "allowed": false,
+                "reason": "policy_restricted",
+                "projection_revision": 1,
+                "cache_revision": 1
+            },
+            "observed_customer_denial": false,
+            "candidate": false,
+            "eligible": false
+        },
+        {
+            "id": "u02009",
+            "status": "outside_incident",
+            "reason": "detection_required",
+            "source_active": true,
+            "source_expires_at": "2027-08-04T00:00:00Z",
+            "source_freshness": "fresh",
+            "gate": {
+                "allowed": false,
+                "reason": "policy_restricted",
+                "projection_revision": 1,
+                "cache_revision": 1
+            },
+            "observed_customer_denial": false,
+            "candidate": false,
+            "eligible": false
+        },
+        {
+            "id": "u02010",
+            "status": "outside_incident",
+            "reason": "detection_required",
+            "source_active": true,
+            "source_expires_at": "2027-08-04T00:00:00Z",
+            "source_freshness": "fresh",
+            "gate": {
+                "allowed": false,
+                "reason": "identity_ambiguous",
+                "projection_revision": 0,
+                "cache_revision": 0
+            },
+            "observed_customer_denial": false,
+            "candidate": false,
+            "eligible": false
+        },
+        {
+            "id": "u02011",
+            "status": "outside_incident",
+            "reason": "detection_required",
+            "source_active": true,
+            "source_expires_at": "2027-08-04T00:00:00Z",
+            "source_freshness": "fresh",
+            "gate": {
+                "allowed": false,
+                "reason": "identity_ambiguous",
+                "projection_revision": 0,
+                "cache_revision": 0
+            },
+            "observed_customer_denial": false,
+            "candidate": false,
+            "eligible": false
+        },
+        {
+            "id": "u02012",
+            "status": "outside_incident",
+            "reason": "detection_required",
+            "source_active": true,
+            "source_expires_at": "2027-08-04T00:00:00Z",
+            "source_freshness": "fresh",
+            "gate": {
+                "allowed": false,
+                "reason": "identity_ambiguous",
+                "projection_revision": 0,
+                "cache_revision": 0
+            },
+            "observed_customer_denial": false,
+            "candidate": false,
+            "eligible": false
+        },
+        {
+            "id": "u02013",
+            "status": "outside_incident",
+            "reason": "detection_required",
+            "source_active": false,
+            "source_expires_at": null,
+            "source_freshness": "unavailable",
+            "gate": {
+                "allowed": false,
+                "reason": "subscription_expired",
+                "projection_revision": 1,
+                "cache_revision": 1
+            },
+            "observed_customer_denial": false,
+            "candidate": false,
+            "eligible": false
+        },
+        {
+            "id": "u02014",
+            "status": "outside_incident",
+            "reason": "detection_required",
+            "source_active": true,
+            "source_expires_at": "2027-08-04T00:00:00Z",
+            "source_freshness": "stale",
+            "gate": {
+                "allowed": true,
+                "reason": "allowed",
+                "projection_revision": 1,
+                "cache_revision": 1
+            },
+            "observed_customer_denial": false,
+            "candidate": false,
+            "eligible": false
+        },
+        {
+            "id": "u02015",
+            "status": "outside_incident",
+            "reason": "detection_required",
+            "source_active": true,
+            "source_expires_at": "2027-08-04T00:00:00Z",
+            "source_freshness": "stale",
+            "gate": {
+                "allowed": true,
+                "reason": "allowed",
+                "projection_revision": 1,
+                "cache_revision": 1
+            },
+            "observed_customer_denial": false,
+            "candidate": false,
+            "eligible": false
+        },
+        {
+            "id": "u02016",
+            "status": "outside_incident",
+            "reason": "detection_required",
+            "source_active": true,
+            "source_expires_at": "2027-08-04T00:00:00Z",
+            "source_freshness": "fresh",
+            "gate": {
+                "allowed": true,
+                "reason": "allowed",
+                "projection_revision": 1,
+                "cache_revision": 1
+            },
+            "observed_customer_denial": false,
+            "candidate": false,
+            "eligible": false
+        },
+        {
+            "id": "u02017",
+            "status": "outside_incident",
+            "reason": "detection_required",
+            "source_active": true,
+            "source_expires_at": "2027-08-04T00:00:00Z",
+            "source_freshness": "fresh",
+            "gate": {
+                "allowed": true,
+                "reason": "allowed",
+                "projection_revision": 1,
+                "cache_revision": 1
+            },
+            "observed_customer_denial": false,
+            "candidate": false,
+            "eligible": false
+        },
+        {
+            "id": "u02018",
+            "status": "outside_incident",
+            "reason": "detection_required",
+            "source_active": true,
+            "source_expires_at": "2027-08-04T00:00:00Z",
+            "source_freshness": "fresh",
+            "gate": {
+                "allowed": true,
+                "reason": "allowed",
+                "projection_revision": 1,
+                "cache_revision": 1
+            },
+            "observed_customer_denial": false,
+            "candidate": false,
+            "eligible": false
+        },
+        {
+            "id": "u02019",
+            "status": "outside_incident",
+            "reason": "detection_required",
+            "source_active": true,
+            "source_expires_at": "2027-08-04T00:00:00Z",
+            "source_freshness": "fresh",
+            "gate": {
+                "allowed": true,
+                "reason": "allowed",
+                "projection_revision": 1,
+                "cache_revision": 1
+            },
+            "observed_customer_denial": false,
+            "candidate": false,
+            "eligible": false
+        },
+        {
+            "id": "u02020",
+            "status": "outside_incident",
+            "reason": "detection_required",
+            "source_active": true,
+            "source_expires_at": "2027-08-04T00:00:00Z",
+            "source_freshness": "fresh",
+            "gate": {
+                "allowed": true,
+                "reason": "allowed",
+                "projection_revision": 1,
+                "cache_revision": 1
+            },
+            "observed_customer_denial": false,
+            "candidate": false,
+            "eligible": false
+        },
+        {
+            "id": "u02021",
+            "status": "outside_incident",
+            "reason": "detection_required",
+            "source_active": true,
+            "source_expires_at": "2027-08-04T00:00:00Z",
+            "source_freshness": "fresh",
+            "gate": {
+                "allowed": true,
+                "reason": "allowed",
+                "projection_revision": 1,
+                "cache_revision": 1
+            },
+            "observed_customer_denial": false,
+            "candidate": false,
+            "eligible": false
+        },
+        {
+            "id": "u02022",
+            "status": "outside_incident",
+            "reason": "detection_required",
+            "source_active": true,
+            "source_expires_at": "2027-08-04T00:00:00Z",
+            "source_freshness": "fresh",
+            "gate": {
+                "allowed": true,
+                "reason": "allowed",
+                "projection_revision": 1,
+                "cache_revision": 1
+            },
+            "observed_customer_denial": false,
+            "candidate": false,
+            "eligible": false
+        },
+        {
+            "id": "u02023",
+            "status": "outside_incident",
+            "reason": "detection_required",
+            "source_active": true,
+            "source_expires_at": "2027-08-04T00:00:00Z",
+            "source_freshness": "fresh",
+            "gate": {
+                "allowed": true,
+                "reason": "allowed",
+                "projection_revision": 1,
+                "cache_revision": 1
+            },
+            "observed_customer_denial": false,
+            "candidate": false,
+            "eligible": false
+        },
+        {
+            "id": "u02024",
+            "status": "outside_incident",
+            "reason": "detection_required",
+            "source_active": true,
+            "source_expires_at": "2027-08-04T00:00:00Z",
+            "source_freshness": "fresh",
+            "gate": {
+                "allowed": true,
+                "reason": "allowed",
+                "projection_revision": 1,
+                "cache_revision": 1
+            },
+            "observed_customer_denial": false,
+            "candidate": false,
+            "eligible": false
+        },
+        {
+            "id": "u02025",
+            "status": "outside_incident",
+            "reason": "detection_required",
+            "source_active": true,
+            "source_expires_at": "2027-08-04T00:00:00Z",
+            "source_freshness": "fresh",
+            "gate": {
+                "allowed": true,
+                "reason": "allowed",
+                "projection_revision": 1,
+                "cache_revision": 1
+            },
+            "observed_customer_denial": false,
+            "candidate": false,
+            "eligible": false
+        },
+        {
+            "id": "u02026",
+            "status": "outside_incident",
+            "reason": "detection_required",
+            "source_active": true,
+            "source_expires_at": "2027-08-04T00:00:00Z",
+            "source_freshness": "fresh",
+            "gate": {
+                "allowed": true,
+                "reason": "allowed",
+                "projection_revision": 1,
+                "cache_revision": 1
+            },
+            "observed_customer_denial": false,
+            "candidate": false,
+            "eligible": false
+        },
+        {
+            "id": "u02027",
+            "status": "outside_incident",
+            "reason": "detection_required",
+            "source_active": true,
+            "source_expires_at": "2027-08-04T00:00:00Z",
+            "source_freshness": "fresh",
+            "gate": {
+                "allowed": true,
+                "reason": "allowed",
+                "projection_revision": 1,
+                "cache_revision": 1
+            },
+            "observed_customer_denial": false,
+            "candidate": false,
+            "eligible": false
+        },
+        {
+            "id": "u02028",
+            "status": "outside_incident",
+            "reason": "detection_required",
+            "source_active": true,
+            "source_expires_at": "2027-08-04T00:00:00Z",
+            "source_freshness": "fresh",
+            "gate": {
+                "allowed": true,
+                "reason": "allowed",
+                "projection_revision": 1,
+                "cache_revision": 1
+            },
+            "observed_customer_denial": false,
+            "candidate": false,
+            "eligible": false
+        },
+        {
+            "id": "u02029",
+            "status": "outside_incident",
+            "reason": "detection_required",
+            "source_active": true,
+            "source_expires_at": "2027-08-04T00:00:00Z",
+            "source_freshness": "fresh",
+            "gate": {
+                "allowed": true,
+                "reason": "allowed",
+                "projection_revision": 1,
+                "cache_revision": 1
+            },
+            "observed_customer_denial": false,
+            "candidate": false,
+            "eligible": false
+        },
+        {
+            "id": "u02030",
+            "status": "outside_incident",
+            "reason": "detection_required",
+            "source_active": true,
+            "source_expires_at": "2027-08-04T00:00:00Z",
+            "source_freshness": "fresh",
+            "gate": {
+                "allowed": true,
+                "reason": "allowed",
+                "projection_revision": 1,
+                "cache_revision": 1
+            },
+            "observed_customer_denial": false,
+            "candidate": false,
+            "eligible": false
+        },
+        {
+            "id": "u02031",
+            "status": "outside_incident",
+            "reason": "detection_required",
+            "source_active": true,
+            "source_expires_at": "2027-08-04T00:00:00Z",
+            "source_freshness": "fresh",
+            "gate": {
+                "allowed": true,
+                "reason": "allowed",
+                "projection_revision": 1,
+                "cache_revision": 1
+            },
+            "observed_customer_denial": false,
+            "candidate": false,
+            "eligible": false
+        },
+        {
+            "id": "u02032",
+            "status": "outside_incident",
+            "reason": "detection_required",
+            "source_active": true,
+            "source_expires_at": "2027-08-04T00:00:00Z",
+            "source_freshness": "fresh",
+            "gate": {
+                "allowed": true,
+                "reason": "allowed",
+                "projection_revision": 1,
+                "cache_revision": 1
+            },
+            "observed_customer_denial": false,
+            "candidate": false,
+            "eligible": false
+        },
+        {
+            "id": "u02033",
+            "status": "outside_incident",
+            "reason": "detection_required",
+            "source_active": true,
+            "source_expires_at": "2027-08-04T00:00:00Z",
+            "source_freshness": "fresh",
+            "gate": {
+                "allowed": true,
+                "reason": "allowed",
+                "projection_revision": 1,
+                "cache_revision": 1
+            },
+            "observed_customer_denial": false,
+            "candidate": false,
+            "eligible": false
+        },
+        {
+            "id": "u02034",
+            "status": "outside_incident",
+            "reason": "detection_required",
+            "source_active": true,
+            "source_expires_at": "2027-08-04T00:00:00Z",
+            "source_freshness": "fresh",
+            "gate": {
+                "allowed": true,
+                "reason": "allowed",
+                "projection_revision": 1,
+                "cache_revision": 1
+            },
+            "observed_customer_denial": false,
+            "candidate": false,
+            "eligible": false
+        },
+        {
+            "id": "u02035",
+            "status": "outside_incident",
+            "reason": "detection_required",
+            "source_active": true,
+            "source_expires_at": "2027-08-04T00:00:00Z",
+            "source_freshness": "fresh",
+            "gate": {
+                "allowed": true,
+                "reason": "allowed",
+                "projection_revision": 1,
+                "cache_revision": 1
+            },
+            "observed_customer_denial": false,
+            "candidate": false,
+            "eligible": false
+        },
+        {
+            "id": "u02036",
+            "status": "outside_incident",
+            "reason": "detection_required",
+            "source_active": true,
+            "source_expires_at": "2027-08-04T00:00:00Z",
+            "source_freshness": "fresh",
+            "gate": {
+                "allowed": true,
+                "reason": "allowed",
+                "projection_revision": 1,
+                "cache_revision": 1
+            },
+            "observed_customer_denial": false,
+            "candidate": false,
+            "eligible": false
+        },
+        {
+            "id": "u02037",
+            "status": "outside_incident",
+            "reason": "detection_required",
+            "source_active": true,
+            "source_expires_at": "2027-08-04T00:00:00Z",
+            "source_freshness": "fresh",
+            "gate": {
+                "allowed": true,
+                "reason": "allowed",
+                "projection_revision": 1,
+                "cache_revision": 1
+            },
+            "observed_customer_denial": false,
+            "candidate": false,
+            "eligible": false
+        },
+        {
+            "id": "u02038",
+            "status": "outside_incident",
+            "reason": "detection_required",
+            "source_active": true,
+            "source_expires_at": "2027-08-04T00:00:00Z",
+            "source_freshness": "fresh",
+            "gate": {
+                "allowed": true,
+                "reason": "allowed",
+                "projection_revision": 1,
+                "cache_revision": 1
+            },
+            "observed_customer_denial": false,
+            "candidate": false,
+            "eligible": false
+        },
+        {
+            "id": "u02039",
+            "status": "outside_incident",
+            "reason": "detection_required",
+            "source_active": true,
+            "source_expires_at": "2027-08-04T00:00:00Z",
+            "source_freshness": "fresh",
+            "gate": {
+                "allowed": true,
+                "reason": "allowed",
+                "projection_revision": 1,
+                "cache_revision": 1
+            },
+            "observed_customer_denial": false,
+            "candidate": false,
+            "eligible": false
+        },
+        {
+            "id": "u02040",
+            "status": "outside_incident",
+            "reason": "detection_required",
+            "source_active": true,
+            "source_expires_at": "2027-08-04T00:00:00Z",
+            "source_freshness": "fresh",
+            "gate": {
+                "allowed": true,
+                "reason": "allowed",
+                "projection_revision": 1,
+                "cache_revision": 1
+            },
+            "observed_customer_denial": false,
+            "candidate": false,
+            "eligible": false
+        },
+        {
+            "id": "u02041",
+            "status": "outside_incident",
+            "reason": "detection_required",
+            "source_active": true,
+            "source_expires_at": "2027-08-04T00:00:00Z",
+            "source_freshness": "fresh",
+            "gate": {
+                "allowed": true,
+                "reason": "allowed",
+                "projection_revision": 1,
+                "cache_revision": 1
+            },
+            "observed_customer_denial": false,
+            "candidate": false,
+            "eligible": false
+        },
+        {
+            "id": "u02042",
+            "status": "outside_incident",
+            "reason": "detection_required",
+            "source_active": true,
+            "source_expires_at": "2027-08-04T00:00:00Z",
+            "source_freshness": "fresh",
+            "gate": {
+                "allowed": true,
+                "reason": "allowed",
+                "projection_revision": 1,
+                "cache_revision": 1
+            },
+            "observed_customer_denial": false,
+            "candidate": false,
+            "eligible": false
+        },
+        {
+            "id": "u02043",
+            "status": "outside_incident",
+            "reason": "detection_required",
+            "source_active": true,
+            "source_expires_at": "2027-08-04T00:00:00Z",
+            "source_freshness": "fresh",
+            "gate": {
+                "allowed": true,
+                "reason": "allowed",
+                "projection_revision": 1,
+                "cache_revision": 1
+            },
+            "observed_customer_denial": false,
+            "candidate": false,
+            "eligible": false
+        },
+        {
+            "id": "u02044",
+            "status": "outside_incident",
+            "reason": "detection_required",
+            "source_active": true,
+            "source_expires_at": "2027-08-04T00:00:00Z",
+            "source_freshness": "fresh",
+            "gate": {
+                "allowed": true,
+                "reason": "allowed",
+                "projection_revision": 1,
+                "cache_revision": 1
+            },
+            "observed_customer_denial": false,
+            "candidate": false,
+            "eligible": false
+        },
+        {
+            "id": "u02045",
+            "status": "outside_incident",
+            "reason": "detection_required",
+            "source_active": true,
+            "source_expires_at": "2027-08-04T00:00:00Z",
+            "source_freshness": "fresh",
+            "gate": {
+                "allowed": true,
+                "reason": "allowed",
+                "projection_revision": 1,
+                "cache_revision": 1
+            },
+            "observed_customer_denial": false,
+            "candidate": false,
+            "eligible": false
+        },
+        {
+            "id": "u02046",
+            "status": "outside_incident",
+            "reason": "detection_required",
+            "source_active": true,
+            "source_expires_at": "2027-08-04T00:00:00Z",
+            "source_freshness": "fresh",
+            "gate": {
+                "allowed": true,
+                "reason": "allowed",
+                "projection_revision": 1,
+                "cache_revision": 1
+            },
+            "observed_customer_denial": false,
+            "candidate": false,
+            "eligible": false
+        },
+        {
+            "id": "u02047",
+            "status": "outside_incident",
+            "reason": "detection_required",
+            "source_active": true,
+            "source_expires_at": "2027-08-04T00:00:00Z",
+            "source_freshness": "fresh",
+            "gate": {
+                "allowed": true,
+                "reason": "allowed",
+                "projection_revision": 1,
+                "cache_revision": 1
+            },
+            "observed_customer_denial": false,
+            "candidate": false,
+            "eligible": false
+        },
+        {
+            "id": "u02048",
+            "status": "outside_incident",
+            "reason": "detection_required",
+            "source_active": true,
+            "source_expires_at": "2027-08-04T00:00:00Z",
+            "source_freshness": "fresh",
+            "gate": {
+                "allowed": true,
+                "reason": "allowed",
+                "projection_revision": 1,
+                "cache_revision": 1
+            },
+            "observed_customer_denial": false,
+            "candidate": false,
+            "eligible": false
+        },
+        {
+            "id": "u02049",
+            "status": "outside_incident",
+            "reason": "detection_required",
+            "source_active": true,
+            "source_expires_at": "2027-08-04T00:00:00Z",
+            "source_freshness": "fresh",
+            "gate": {
+                "allowed": true,
+                "reason": "allowed",
+                "projection_revision": 1,
+                "cache_revision": 1
+            },
+            "observed_customer_denial": false,
+            "candidate": false,
+            "eligible": false
+        },
+        {
+            "id": "u02050",
+            "status": "outside_incident",
+            "reason": "detection_required",
+            "source_active": true,
+            "source_expires_at": "2027-08-04T00:00:00Z",
+            "source_freshness": "fresh",
+            "gate": {
+                "allowed": true,
+                "reason": "allowed",
+                "projection_revision": 1,
+                "cache_revision": 1
+            },
+            "observed_customer_denial": false,
+            "candidate": false,
+            "eligible": false
+        },
+        {
+            "id": "u02051",
+            "status": "outside_incident",
+            "reason": "detection_required",
+            "source_active": true,
+            "source_expires_at": "2027-08-04T00:00:00Z",
+            "source_freshness": "fresh",
+            "gate": {
+                "allowed": true,
+                "reason": "allowed",
+                "projection_revision": 1,
+                "cache_revision": 1
+            },
+            "observed_customer_denial": false,
+            "candidate": false,
+            "eligible": false
+        },
+        {
+            "id": "u02052",
+            "status": "outside_incident",
+            "reason": "detection_required",
+            "source_active": true,
+            "source_expires_at": "2027-08-04T00:00:00Z",
+            "source_freshness": "fresh",
+            "gate": {
+                "allowed": true,
+                "reason": "allowed",
+                "projection_revision": 1,
+                "cache_revision": 1
+            },
+            "observed_customer_denial": false,
+            "candidate": false,
+            "eligible": false
+        },
+        {
+            "id": "u02053",
+            "status": "outside_incident",
+            "reason": "detection_required",
+            "source_active": true,
+            "source_expires_at": "2027-08-04T00:00:00Z",
+            "source_freshness": "fresh",
+            "gate": {
+                "allowed": true,
+                "reason": "allowed",
+                "projection_revision": 1,
+                "cache_revision": 1
+            },
+            "observed_customer_denial": false,
+            "candidate": false,
+            "eligible": false
+        },
+        {
+            "id": "u02054",
+            "status": "outside_incident",
+            "reason": "detection_required",
+            "source_active": true,
+            "source_expires_at": "2027-08-04T00:00:00Z",
+            "source_freshness": "fresh",
+            "gate": {
+                "allowed": true,
+                "reason": "allowed",
+                "projection_revision": 1,
+                "cache_revision": 1
+            },
+            "observed_customer_denial": false,
+            "candidate": false,
+            "eligible": false
+        },
+        {
+            "id": "u02055",
+            "status": "outside_incident",
+            "reason": "detection_required",
+            "source_active": true,
+            "source_expires_at": "2027-08-04T00:00:00Z",
+            "source_freshness": "fresh",
+            "gate": {
+                "allowed": true,
+                "reason": "allowed",
+                "projection_revision": 1,
+                "cache_revision": 1
+            },
+            "observed_customer_denial": false,
+            "candidate": false,
+            "eligible": false
+        },
+        {
+            "id": "u02056",
+            "status": "outside_incident",
+            "reason": "detection_required",
+            "source_active": true,
+            "source_expires_at": "2027-08-04T00:00:00Z",
+            "source_freshness": "fresh",
+            "gate": {
+                "allowed": true,
+                "reason": "allowed",
+                "projection_revision": 1,
+                "cache_revision": 1
+            },
+            "observed_customer_denial": false,
+            "candidate": false,
+            "eligible": false
+        },
+        {
+            "id": "u02057",
+            "status": "outside_incident",
+            "reason": "detection_required",
+            "source_active": true,
+            "source_expires_at": "2027-08-04T00:00:00Z",
+            "source_freshness": "fresh",
+            "gate": {
+                "allowed": true,
+                "reason": "allowed",
+                "projection_revision": 1,
+                "cache_revision": 1
+            },
+            "observed_customer_denial": false,
+            "candidate": false,
+            "eligible": false
+        },
+        {
+            "id": "u02058",
+            "status": "outside_incident",
+            "reason": "detection_required",
+            "source_active": true,
+            "source_expires_at": "2027-08-04T00:00:00Z",
+            "source_freshness": "fresh",
+            "gate": {
+                "allowed": true,
+                "reason": "allowed",
+                "projection_revision": 1,
+                "cache_revision": 1
+            },
+            "observed_customer_denial": false,
+            "candidate": false,
+            "eligible": false
+        },
+        {
+            "id": "u02059",
+            "status": "outside_incident",
+            "reason": "detection_required",
+            "source_active": true,
+            "source_expires_at": "2027-08-04T00:00:00Z",
+            "source_freshness": "fresh",
+            "gate": {
+                "allowed": true,
+                "reason": "allowed",
+                "projection_revision": 1,
+                "cache_revision": 1
+            },
+            "observed_customer_denial": false,
+            "candidate": false,
+            "eligible": false
+        },
+        {
+            "id": "u02060",
+            "status": "outside_incident",
+            "reason": "detection_required",
+            "source_active": true,
+            "source_expires_at": "2027-08-04T00:00:00Z",
+            "source_freshness": "fresh",
+            "gate": {
+                "allowed": true,
+                "reason": "allowed",
+                "projection_revision": 1,
+                "cache_revision": 1
+            },
+            "observed_customer_denial": false,
+            "candidate": false,
+            "eligible": false
+        },
+        {
+            "id": "u02061",
+            "status": "outside_incident",
+            "reason": "detection_required",
+            "source_active": true,
+            "source_expires_at": "2027-08-04T00:00:00Z",
+            "source_freshness": "fresh",
+            "gate": {
+                "allowed": true,
+                "reason": "allowed",
+                "projection_revision": 1,
+                "cache_revision": 1
+            },
+            "observed_customer_denial": false,
+            "candidate": false,
+            "eligible": false
+        },
+        {
+            "id": "u02062",
+            "status": "outside_incident",
+            "reason": "detection_required",
+            "source_active": true,
+            "source_expires_at": "2027-08-04T00:00:00Z",
+            "source_freshness": "fresh",
+            "gate": {
+                "allowed": true,
+                "reason": "allowed",
+                "projection_revision": 1,
+                "cache_revision": 1
+            },
+            "observed_customer_denial": false,
+            "candidate": false,
+            "eligible": false
+        },
+        {
+            "id": "u02063",
+            "status": "outside_incident",
+            "reason": "detection_required",
+            "source_active": true,
+            "source_expires_at": "2027-08-04T00:00:00Z",
+            "source_freshness": "fresh",
+            "gate": {
+                "allowed": true,
+                "reason": "allowed",
+                "projection_revision": 1,
+                "cache_revision": 1
+            },
+            "observed_customer_denial": false,
+            "candidate": false,
+            "eligible": false
+        },
+        {
+            "id": "u02064",
+            "status": "outside_incident",
+            "reason": "detection_required",
+            "source_active": true,
+            "source_expires_at": "2027-08-04T00:00:00Z",
+            "source_freshness": "fresh",
+            "gate": {
+                "allowed": true,
+                "reason": "allowed",
+                "projection_revision": 1,
+                "cache_revision": 1
+            },
+            "observed_customer_denial": false,
+            "candidate": false,
+            "eligible": false
+        },
+        {
+            "id": "u02065",
+            "status": "outside_incident",
+            "reason": "detection_required",
+            "source_active": true,
+            "source_expires_at": "2027-08-04T00:00:00Z",
+            "source_freshness": "fresh",
+            "gate": {
+                "allowed": true,
+                "reason": "allowed",
+                "projection_revision": 1,
+                "cache_revision": 1
+            },
+            "observed_customer_denial": false,
+            "candidate": false,
+            "eligible": false
+        },
+        {
+            "id": "u02066",
+            "status": "outside_incident",
+            "reason": "detection_required",
+            "source_active": true,
+            "source_expires_at": "2027-08-04T00:00:00Z",
+            "source_freshness": "fresh",
+            "gate": {
+                "allowed": true,
+                "reason": "allowed",
+                "projection_revision": 1,
+                "cache_revision": 1
+            },
+            "observed_customer_denial": false,
+            "candidate": false,
+            "eligible": false
+        },
+        {
+            "id": "u02067",
+            "status": "outside_incident",
+            "reason": "detection_required",
+            "source_active": true,
+            "source_expires_at": "2027-08-04T00:00:00Z",
+            "source_freshness": "fresh",
+            "gate": {
+                "allowed": true,
+                "reason": "allowed",
+                "projection_revision": 1,
+                "cache_revision": 1
+            },
+            "observed_customer_denial": false,
+            "candidate": false,
+            "eligible": false
+        },
+        {
+            "id": "u02068",
+            "status": "outside_incident",
+            "reason": "detection_required",
+            "source_active": true,
+            "source_expires_at": "2027-08-04T00:00:00Z",
+            "source_freshness": "fresh",
+            "gate": {
+                "allowed": true,
+                "reason": "allowed",
+                "projection_revision": 1,
+                "cache_revision": 1
+            },
+            "observed_customer_denial": false,
+            "candidate": false,
+            "eligible": false
+        },
+        {
+            "id": "u02069",
+            "status": "outside_incident",
+            "reason": "detection_required",
+            "source_active": true,
+            "source_expires_at": "2027-08-04T00:00:00Z",
+            "source_freshness": "fresh",
+            "gate": {
+                "allowed": true,
+                "reason": "allowed",
+                "projection_revision": 1,
+                "cache_revision": 1
+            },
+            "observed_customer_denial": false,
+            "candidate": false,
+            "eligible": false
+        },
+        {
+            "id": "u02070",
+            "status": "outside_incident",
+            "reason": "detection_required",
+            "source_active": true,
+            "source_expires_at": "2027-08-04T00:00:00Z",
+            "source_freshness": "fresh",
+            "gate": {
+                "allowed": true,
+                "reason": "allowed",
+                "projection_revision": 1,
+                "cache_revision": 1
+            },
+            "observed_customer_denial": false,
+            "candidate": false,
+            "eligible": false
+        },
+        {
+            "id": "u02071",
+            "status": "outside_incident",
+            "reason": "detection_required",
+            "source_active": true,
+            "source_expires_at": "2027-08-04T00:00:00Z",
+            "source_freshness": "fresh",
+            "gate": {
+                "allowed": true,
+                "reason": "allowed",
+                "projection_revision": 1,
+                "cache_revision": 1
+            },
+            "observed_customer_denial": false,
+            "candidate": false,
+            "eligible": false
+        },
+        {
+            "id": "u02072",
+            "status": "outside_incident",
+            "reason": "detection_required",
+            "source_active": true,
+            "source_expires_at": "2027-08-04T00:00:00Z",
+            "source_freshness": "fresh",
+            "gate": {
+                "allowed": true,
+                "reason": "allowed",
+                "projection_revision": 1,
+                "cache_revision": 1
+            },
+            "observed_customer_denial": false,
+            "candidate": false,
+            "eligible": false
+        },
+        {
+            "id": "u02073",
+            "status": "outside_incident",
+            "reason": "detection_required",
+            "source_active": true,
+            "source_expires_at": "2027-08-04T00:00:00Z",
+            "source_freshness": "fresh",
+            "gate": {
+                "allowed": true,
+                "reason": "allowed",
+                "projection_revision": 1,
+                "cache_revision": 1
+            },
+            "observed_customer_denial": false,
+            "candidate": false,
+            "eligible": false
+        },
+        {
+            "id": "u02074",
+            "status": "outside_incident",
+            "reason": "detection_required",
+            "source_active": true,
+            "source_expires_at": "2027-08-04T00:00:00Z",
+            "source_freshness": "fresh",
+            "gate": {
+                "allowed": true,
+                "reason": "allowed",
+                "projection_revision": 1,
+                "cache_revision": 1
+            },
+            "observed_customer_denial": false,
+            "candidate": false,
+            "eligible": false
+        },
+        {
+            "id": "u02075",
+            "status": "outside_incident",
+            "reason": "detection_required",
+            "source_active": true,
+            "source_expires_at": "2027-08-04T00:00:00Z",
+            "source_freshness": "fresh",
+            "gate": {
+                "allowed": true,
+                "reason": "allowed",
+                "projection_revision": 1,
+                "cache_revision": 1
+            },
+            "observed_customer_denial": false,
+            "candidate": false,
+            "eligible": false
+        }
+    ],
+    "plans": [],
+    "history": [],
+    "collector": {
+        "event_count": 72,
+        "kinds": {
+            "access_projection_changed": 24,
+            "feature_access_decided": 0,
+            "handler_completed": 24,
+            "resync_completed": 0,
+            "resync_requested": 0,
+            "source_entitlement_observed": 0,
+            "verification_completed": 0,
+            "webhook_received": 24
+        }
+    }
+}

@@ -1,0 +1,115 @@
+{
+    "operations": [
+        {
+            "txn": "txn_duplicate",
+            "user": "u00003",
+            "event_class": "purchase",
+            "currency": "USD",
+            "source_amount": "12.99",
+            "destination_amount": "25.98",
+            "delta": "12.99",
+            "status": "open",
+            "environment": "Production"
+        },
+        {
+            "txn": "txn_ghost",
+            "user": "u00009",
+            "event_class": "purchase",
+            "currency": "USD",
+            "source_amount": "0.00",
+            "destination_amount": "11.98",
+            "delta": "11.98",
+            "status": "manual",
+            "environment": "Production"
+        },
+        {
+            "txn": "txn_healthy_eur",
+            "user": "u00007",
+            "event_class": "purchase",
+            "currency": "EUR",
+            "source_amount": "6.99",
+            "destination_amount": "6.99",
+            "delta": "0.00",
+            "status": "healthy",
+            "environment": "Production"
+        },
+        {
+            "txn": "txn_healthy_usd",
+            "user": "u00006",
+            "event_class": "purchase",
+            "currency": "USD",
+            "source_amount": "6.99",
+            "destination_amount": "6.99",
+            "delta": "0.00",
+            "status": "healthy",
+            "environment": "Production"
+        },
+        {
+            "txn": "txn_missing_purchase",
+            "user": "u00001",
+            "event_class": "purchase",
+            "currency": "USD",
+            "source_amount": "9.99",
+            "destination_amount": "0.00",
+            "delta": "-9.99",
+            "status": "open",
+            "environment": "Production"
+        },
+        {
+            "txn": "txn_missing_refund",
+            "user": "u00002",
+            "event_class": "purchase",
+            "currency": "USD",
+            "source_amount": "6.99",
+            "destination_amount": "6.99",
+            "delta": "0.00",
+            "status": "healthy",
+            "environment": "Production"
+        },
+        {
+            "txn": "txn_missing_refund",
+            "user": "u00002",
+            "event_class": "refund",
+            "currency": "USD",
+            "source_amount": "-6.99",
+            "destination_amount": "0.00",
+            "delta": "6.99",
+            "status": "open",
+            "environment": "Production"
+        },
+        {
+            "txn": "txn_price",
+            "user": "u00004",
+            "event_class": "purchase",
+            "currency": "EUR",
+            "source_amount": "9.99",
+            "destination_amount": "999.00",
+            "delta": "989.01",
+            "status": "open",
+            "environment": "Production"
+        },
+        {
+            "txn": "txn_renamed",
+            "user": "u00005",
+            "event_class": "purchase",
+            "currency": "EUR",
+            "source_amount": "14.99",
+            "destination_amount": "14.99",
+            "delta": "0.00",
+            "status": "unmapped",
+            "environment": "Production"
+        },
+        {
+            "txn": "txn_sandbox",
+            "user": "u00008",
+            "event_class": "purchase",
+            "currency": "USD",
+            "source_amount": "0.00",
+            "destination_amount": "0.00",
+            "delta": "0.00",
+            "status": "expected",
+            "environment": "Sandbox"
+        }
+    ],
+    "mode": "FULL_MOCK"
+}

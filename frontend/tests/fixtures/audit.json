@@ -1,0 +1,35 @@
+{
+    "run": "mock-run-20261107",
+    "mode": "FULL_MOCK",
+    "manifest": {
+        "run_id": "mock-run-20261107",
+        "seed": 20261107,
+        "mode": "FULL_MOCK",
+        "source_provenance": "synthetic",
+        "clock_utc_epoch_seconds": 1794042000,
+        "currency_aggregation": "per_currency_only",
+        "environment": "Production",
+        "app": "mock-lumen",
+        "project": "mock-mixpanel-eu",
+        "region": "EU",
+        "project_timezone": "America/New_York",
+        "complete_account_registry": true,
+        "source_amount_authority": "synthetic Adapty-shaped event log; NOT GET /profile/"
+    },
+    "journal": [
+        {
+            "type": "SEEDED",
+            "run_id": "mock-run-20261107",
+            "clock": 0,
+            "source_events": 9,
+            "raw_mp_events": 8
+        }
+    ],
+    "actions": {},
+    "approvals": {},
+    "verification": {
+        "status": "not_run",
+        "tick": 0,
+        "actions": []
+    }
+}

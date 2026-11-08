@@ -10,6 +10,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import ipaddress
 import json
 import mimetypes
+import os
 from decimal import Decimal, DecimalException
 from pathlib import Path
 from threading import RLock
@@ -22,7 +23,8 @@ HERE = Path(__file__).resolve().parent
 STATE = HERE / 'runtime' / 'state.json'
 EVAL = HERE / '_evaluation' / 'oracle.json'
 REFERENCE = HERE / 'reference'
-STATIC = HERE.parent / 'Reconcile' / 'dist'
+# Static UI folder. Default: the original string-template UI. RECONCILE_STATIC=web serves the React build (Reconcile/web).
+STATIC = HERE.parent / 'Reconcile' / {'web': 'web'}.get(os.environ.get('RECONCILE_STATIC', ''), 'dist')
 ID = 'mock-run-20261107'
 APP = 'mock-lumen'
 T0 = 1794042000  # fixed seconds, not wall clock
@@ -671,5 +673,11 @@ def main():
     if a.command=='verify':print(canon(detect(s)['gap']));return
     if a.command=='serve':
         paid_access.ensure()
-        print(f'MOCK ONLY at http://127.0.0.1:{a.port}, no external services');ThreadingHTTPServer(('127.0.0.1',a.port),Handler).serve_forever()
+        print(f'MOCK ONLY at http://127.0.0.1:{a.port}, no external services');LocalServer(('127.0.0.1',a.port),Handler).serve_forever()
+
+class LocalServer(ThreadingHTTPServer):
+    # The UI fires ~7 parallel reads after each action. The stdlib default backlog of 5
+    # lets macOS reset the next connection, which the browser reports as "Failed to fetch".
+    request_queue_size=64
+    daemon_threads=True
 if __name__=='__main__':main()

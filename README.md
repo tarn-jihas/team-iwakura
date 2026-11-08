@@ -24,6 +24,12 @@ Use **Demo Lab → Reset demo** to deliberately return to the initial state.
 Access recovery seeds itself on first server startup and has a separate reset.
 For an explicit clean seed of both flows, stop the server and run `npm run seed`.
 
+## React UI (branch `react-migration`)
+
+The same UI is also available as a React + TypeScript modular monolith in `frontend/`
+(same CSS, markup and behaviour). `npm install --prefix frontend`, `npm run build:web`,
+then `npm run start:web`. See [frontend/README.md](frontend/README.md) for structure and tests.
+
 ## Paid Access Recovery
 
 Open **Cases → Open access incident**, or `/access.html`. Demonstrate the Lumen

@@ -6,3 +6,7 @@ reconcile-mock-first-kit/runtime/*.json
 reconcile-mock-first-kit/runtime/*.tmp
 Reconcile/.openai/
 .artifacts/
+
+# React build output
+Reconcile/web/
+frontend/node_modules/

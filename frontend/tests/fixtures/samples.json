@@ -1,0 +1,104 @@
+{
+    "samples": [
+        {
+            "path": "amplitude/export_projection.jsonl",
+            "provider": "amplitude",
+            "bytes": 398
+        },
+        {
+            "path": "amplitude/ingestion.json",
+            "provider": "amplitude",
+            "bytes": 495
+        },
+        {
+            "path": "apple/financial_projection.tsv",
+            "provider": "apple",
+            "bytes": 353
+        },
+        {
+            "path": "apple/transaction_decoded.json",
+            "provider": "apple",
+            "bytes": 319
+        },
+        {
+            "path": "appsflyer/export_projection.csv",
+            "provider": "appsflyer",
+            "bytes": 366
+        },
+        {
+            "path": "appsflyer/s2s_request.json",
+            "provider": "appsflyer",
+            "bytes": 342
+        },
+        {
+            "path": "competitors/apphud_webhook.json",
+            "provider": "competitors",
+            "bytes": 1166
+        },
+        {
+            "path": "competitors/qonversion_webhook.json",
+            "provider": "competitors",
+            "bytes": 706
+        },
+        {
+            "path": "competitors/revenuecat_webhook.json",
+            "provider": "competitors",
+            "bytes": 644
+        },
+        {
+            "path": "competitors/superwall_v2_webhook.json",
+            "provider": "competitors",
+            "bytes": 1054
+        },
+        {
+            "path": "google/money_fractional.json",
+            "provider": "google",
+            "bytes": 66
+        },
+        {
+            "path": "google/renewal_identity.json",
+            "provider": "google",
+            "bytes": 193
+        },
+        {
+            "path": "google/rtdn_decoded.json",
+            "provider": "google",
+            "bytes": 228
+        },
+        {
+            "path": "google/subscription_test.json",
+            "provider": "google",
+            "bytes": 379
+        },
+        {
+            "path": "posthog/capture_request.json",
+            "provider": "posthog",
+            "bytes": 389
+        },
+        {
+            "path": "posthog/s3_export_projection.jsonl",
+            "provider": "posthog",
+            "bytes": 342
+        },
+        {
+            "path": "stripe/charge.json",
+            "provider": "stripe",
+            "bytes": 381
+        },
+        {
+            "path": "stripe/charge_balance_transaction.json",
+            "provider": "stripe",
+            "bytes": 259
+        },
+        {
+            "path": "stripe/refund.json",
+            "provider": "stripe",
+            "bytes": 246
+        },
+        {
+            "path": "stripe/refund_balance_transaction.json",
+            "provider": "stripe",
+            "bytes": 256
+        }
+    ]
+}
