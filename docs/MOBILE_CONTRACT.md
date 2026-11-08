@@ -43,6 +43,33 @@ the SDK state lock. Collection failure must not fail the purchase or feature
 request. Missing delivery remains a coverage gap rather than being silently
 interpreted as evidence that nothing happened.
 
+## Server processing trace
+
+The v2 server contract adds a purchase reference, processing/trace ID and
+allowlisted steps, outcomes and revisions; v1 remains accepted. The handler
+records the projection receipt in the transaction that commits the projection.
+Its background delivery uses a deterministic event ID so a crash between commit
+and delivery cannot invent a second processing result. Cache outcomes are
+separate observations. A missing completion is a gap, not proof of a failed DB
+commit.
+
+A trace contains at most 32 steps, and the event remains bounded to 16 KiB.
+Optional application stack context has at most eight frames, each containing
+only a relative module, function and line. Do not collect locals, raw requests,
+headers, receipts, credentials or arbitrary exception messages. Truncation and
+delivery loss must remain visible in coverage.
+
+Gate observations may also include the locally observed identity, policy,
+projection and cache revisions. These require no source request and associate a
+queued denial with the exact incident state, even after recovery. A later fault
+with new revisions remains a separate episode. Legacy events remain accepted.
+
+Adapty's iOS `setLogHandler` is a possible future native integration hook. It
+does not itself establish that the application's projection or gate is correct;
+logs still need selection and redaction before forwarding. No native hook is
+implemented by this Python server SDK.
+[Adapty iOS logging](https://adapty.io/docs/sdk-installation-ios).
+
 ## Recovery boundary
 
 The client backend exposes account enumeration, read access, a side-effect-free
@@ -53,7 +80,9 @@ premium service.
 
 Only a fresh plan authorized by the automatic policy or an operator may request
 resync. Lumen reads current Adapty
-state and checks the expected revision and entitlement hash. It cannot change
+state and checks the expected revision and entitlement hash. The v2 live
+contract also binds the expected customer mapping and identity/policy revisions;
+Lumen compares these atomically with the projection write. It cannot change
 the source payment record or fall back to a generic premium grant.
 
 Apple/Google cases that need a device or operator action remain

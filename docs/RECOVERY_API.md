@@ -7,17 +7,24 @@ HMAC. Runtime databases and signing material are not exposed through static URLs
 
 ## Automatic monitor API
 
-The live launcher enables policy `local-entitlement-resync-v1`. A signed customer
-denial triggers diagnosis and an exact policy-authorized resync/probe plan. The
+The live launcher uses policy `local-fulfillment-resync-v2`. Independently read
+source expectations and local application audits trigger diagnosis and an exact
+policy-authorized resync/probe plan without requiring a customer denial. The
 policy never authorizes provider writes or grants; evidence checks and durable
 action receipts remain mandatory. The manual API below stays available for
 regression scenarios and advanced investigation.
 
 | Method / path under `/api/recovery` | Input or meaning |
 | --- | --- |
-| `GET /monitor` | Compact connection, automation, incident summary, SDK coverage, simulation progress and complete incident history; no external Adapty request per UI poll |
-| `POST /simulation` | `{action: "once" or "start", operation_key: "unique-id"}`; runs one random local incident or three sequential examples; duplicate keys reuse the job |
+| `GET /monitor` | Connection, automation, incident totals, source/SDK coverage and simulation progress; optional pagination and status filter, no external Adapty request per UI poll |
+| `GET /fulfillments` | Paginated observed purchases/entitlements and their application status; current-profile coverage is not a complete historical purchase ledger |
+| `GET /incidents/{id}/trace` | Observed processing/recovery steps, responsibility, times, results and explicit evidence gaps |
+| `GET /export?from=…&to=…&format=csv\|json` | Activity in UTC `[from,to)`, with full selected incident history through one export cutoff; defaults to the last 24 hours and includes all pages |
+| `GET /simulation` | Durable progress, bootstrap requirement, last cycle, source request counts and waiting reason |
+| `POST /simulation` | `{action: "bootstrap", operation_key: "unique-id"}`; pending-demo mode only, replays 100 existing rights through the normal Lumen handler |
+| `POST /simulation` | `{action: "once", "start" or "continuous", operation_key: "unique-id"}`; one episode, three examples or ongoing generation; duplicate keys reuse the job |
 | `POST /simulation` | `{action: "stop"}`; prevents further injections while current recovery finishes |
+| `POST /simulation` | `{action: "resume", simulation_id: "…"}`; explicit restart of a stopped pending-demo generator, using durable intent/readback |
 
 Monitor incidents use `detecting`, `repairing`, `repaired` or `unresolved` and
 include `detected_at`, `repair_started_at`, `repaired_at`, `duration_ms`, affected
@@ -27,8 +34,25 @@ account does not rewrite an earlier successful recovery. CSV/JSON export uses
 these incident rows. UTC timestamps remain exact in exports.
 
 ```text
-SDK event → scan → policy check → resync → gate verification → incident result
+Source expectation → application readback → discrepancy → policy check → resync → gate verification
 ```
+
+Monitor and fulfillment pages accept `cursor`, `limit` and `status`. The UI uses
+50 rows; totals describe the complete filtered set. Fulfillment statuses are
+`awaiting_application`, `verified_application`, `discrepancy` and `inconclusive`.
+The monitor's `needs_attention` filter includes detecting, repairing and unresolved
+incidents so an in-progress recovery remains visible; `unresolved` selects only
+terminal cases needing investigation.
+Trace history is immutable; `current_fulfillments` is explicitly separate.
+Exports select detection, repair attempts and material diagnosis/status changes;
+routine polling is excluded. JSON adds full trace and historical snapshots;
+CSV contains readable counts, times, ownership, outcomes and trace references.
+
+The pending demo starts with `--live-bootstrap-pending` on a **new** runtime.
+Only local test/demo mode supports `{action:"configure",clock_scale:1..1000}`.
+This scales local audit/grace/generator timers, never source Retry-After or the
+60-second full-source pass limit. Fault controls are unavailable outside demo
+mode. A restarted generator remains stopped until explicitly resumed.
 
 ## Advanced operator API
 
@@ -82,12 +106,18 @@ The Lumen adapter implements `listAccounts(cursor)` as
 `GET /internal/lumen/accounts?cursor=...&limit=...`, `readAccess` as
 `GET /internal/lumen/access?user=...`, `probeAccess` as
 `POST /internal/lumen/probe`, and `resyncAccess` as
-`POST /internal/lumen/resync`. Resync requires `user_id`, `expected_revision`,
-`entitlement` (including its hash) and `operation_key`. Lumen independently reads
-Adapty before applying it. `GET /internal/lumen/action?operation_key=...` supports
+`POST /internal/lumen/resync`. Legacy mock resync requires `user_id`,
+`expected_revision`, `entitlement` (including its hash) and `operation_key`.
+Live writes require schema v2: `user_id`, `expected_provider_customer_id`,
+`expected_identity_revision`, `expected_policy_revision`,
+`expected_projection_revision`, `entitlement`, `operation_key`, `processing_id`
+and `trace_id`. The live entitlement also binds its transaction, store, source
+environment and fingerprint. Lumen independently reads Adapty before applying
+it, then atomically compares all local revisions with the write.
+`GET /internal/lumen/action?operation_key=...` supports
 readback after an ambiguous result. All these adapter calls are signed.
 
-The executable Python SDK lives in `recovery_sdk.py`: schema v1 validation,
+The executable Python SDK lives in `recovery_sdk.py`: versioned DTO validation,
 canonical signing, HTTP transport and bounded durable outbox. `emit()` only
 enqueues; a background worker calls `flush()`. See the
 [mobile contract](MOBILE_CONTRACT.md) for the thin device boundary.

@@ -36,8 +36,8 @@ From the repository root:
 ```sh
 npm run start:live -- \
   --config reconcile-mock-first-kit/runtime/live-adapty/live-config.json \
-  --runtime /tmp/reconcile-live-demo \
-  --port 8876
+  --runtime /tmp/reconcile-fulfillment-demo \
+  --port 0 --live-bootstrap-pending
 ```
 
 The launcher prints the Reconcile and Lumen URLs. It starts three isolated local
@@ -51,19 +51,22 @@ include its version, observation time and a catalog checksum. Account reads use
 the server API; CLI commands are not run for every gate request. Keep the existing
 CLI session authenticated and the private key file available.
 
-1. Open Reconcile and confirm the live seeded source is ready for 100 accounts.
-2. Choose **Run demo** for three random local incidents, or **Simulate once**
-   for one. The failures emulate stale cache, a missed local projection and
-   an out-of-order expiry update. Adapty stays unchanged.
-3. An actual rejected customer request sends signed SDK telemetry. Reconcile
-   opens the incident and independently checks the registered accounts.
-4. Watch the incident move from detection to repair to the verified result.
+1. Open the printed Reconcile URL and confirm the source registry contains 100 accounts.
+2. Choose **Start demo**. The new Lumen runtime awaits initial application;
+   normal handler replay succeeds for 76 accounts and exercises 24 local failures.
+   These are existing synthetic Adapty records, not new payments.
+3. Reconcile detects unapplied access proactively, without a customer gate request
+   or manually opened incident. Source observation alone never changes access.
+4. Watch the incident move from detection to repair to the verified result:
+   23 restored gates and one unresolved application failure remain visible.
    Each repair rechecks the current Adapty entitlement, resynchronizes Lumen and
    probes the same authorization decision used by the customer endpoint.
-5. Read what happened, how it was fixed and its timestamps. Export CSV or JSON.
-   **Stop** prevents the next fault while the current recovery finishes.
+5. Use **Run once** or **Run continuously** for later failures on healthy accounts.
+   **Stop** prevents the next fault while monitoring and current recovery continue.
+   Download activity for a chosen UTC `[from,to)` period as CSV or JSON; detailed
+   observed steps and their owners are available in each incident's Activity.
 
-The policy `local-entitlement-resync-v1` records the exact authorization without
+The policy `local-fulfillment-resync-v2` records the exact authorization without
 requiring an operator click. It allows only existing local access to be resynced
 and verified. Unclear evidence remains unresolved. See
 [automatic recovery and measured overhead](AUTOMATIC_RECOVERY.md).
@@ -77,9 +80,33 @@ mock payment-activation scenarios still exercise provider validation and catalog
 repair separately. A missing, changed, expired or ambiguous live source blocks
 repair; a source entitlement is never reported as independently verified money.
 
-## Public HTTP acceptance
+## Proactive fulfillment verification
 
-Use a fresh local runtime. The automatic harness injects the fixed 24-account
+The 2026-11-08 replay at `8757a30` used fresh isolated Lumen storage and real
+read-only Adapty evidence: **100 observed rights → 76 normal handler successes /
+24 failures → one 24-account incident → 23 restored gates / one unresolved**.
+Detection preceded any customer denial or manual incident. Actual customer gate
+requests then returned 23 HTTP200 and one HTTP403 without creating another
+incident. The trace includes 24 original handler receipts and 23 repair receipts.
+The SDK delivered 346 events including those gate requests, with zero drops,
+errors or remaining backlog. The replay interval observed 299 physical source
+requests, including background polling. Evidence:
+`.artifacts/fulfillment-live-tip.json`.
+
+A separate replay verified restart history and two later recoveries on healthy
+accounts outside the original 24. Browser checks passed at 1280px and 390px,
+including keyboard Start/Stop, preserved focus during polling, trace details and
+CSV/JSON downloads. Both exports contain all three incidents across a one-row
+filtered UI, with UTC `[2026-11-08,2026-11-09)` and summaries 24/23/1, 1/1/0,
+1/1/0. Evidence: `.artifacts/fulfillment-live-final.json`,
+`fulfillment-browser-export.csv`, `fulfillment-browser-export.json`,
+`fulfillment-recovery-desktop.png` and `fulfillment-recovery-mobile.png`.
+These QA runtimes are stopped; use a new runtime for the next demonstration.
+
+## Previous downstream public HTTP acceptance
+
+Use a fresh local runtime without `--live-bootstrap-pending` for the retained
+downstream regression. The automatic harness injects the fixed 24-account
 incident, waits for recovery without sending an operator approval, then runs
 three randomized incidents and checks stable history, source snapshots and
 actual gates. It does not reseed or mutate the remote app:
