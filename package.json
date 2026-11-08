@@ -2,7 +2,18 @@
   "name": "reconcile-mock-first",
   "private": true,
   "type": "module",
+  "workspaces": ["apps/*", "packages/*"],
+  "engines": { "node": ">=22.22.3 <23" },
+  "devDependencies": {
+    "@types/node": "22.20.5",
+    "preact": "11.2.0",
+    "typescript": "5.9.3",
+    "vite": "6.4.5"
+  },
   "scripts": {
+    "build:ts": "npm run build --workspace @reconcile/server-sdk && npm run build --workspace @reconcile/server && npm run build --workspace @reconcile/provider-simulator && npm run build --workspace @reconcile/lumen && npm run build --workspace @reconcile/web",
+    "start:ts": "node apps/server/dist/demo-main.js",
+    "test:ts": "npm run build:ts && npm test --workspace @reconcile/contracts && npm test --workspace @reconcile/server-sdk && node --test apps/server/tests/*.test.mjs && node --test apps/provider-simulator/tests/*.test.mjs && node --test apps/lumen/tests/*.test.mjs && npm test --workspace @reconcile/web",
     "start": "python3 reconcile-mock-first-kit/recovery_demo.py",
     "start:live": "python3 reconcile-mock-first-kit/recovery_live_demo.py",
     "start:legacy": "python3 reconcile-mock-first-kit/reconcile_mock.py serve --port 8765",

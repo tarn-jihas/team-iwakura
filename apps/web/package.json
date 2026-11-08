@@ -1,0 +1,18 @@
+{
+  "name": "@reconcile/web",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --config vite.config.ts",
+    "build": "tsc --noEmit && vite build --config vite.config.ts",
+    "test": "node --experimental-strip-types --test tests/*.test.mjs"
+  },
+  "dependencies": {
+    "preact": "11.2.0"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.5",
+    "typescript": "5.9.3",
+    "vite": "6.4.5"
+  }
+}

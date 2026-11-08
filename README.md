@@ -1,5 +1,26 @@
 # Reconcile · local hackathon demo
 
+## TypeScript migration in progress
+
+The isolated TypeScript/Preact runtime is available for development with Node
+22.22.3: `npm run build:ts`, then `npm run start:ts`. It starts on port 8768
+with new databases under `runtime/typescript/` and leaves existing demo data and
+the original hackathon seeders untouched. `ENGINE_PORT=0` requests a free port;
+the launcher prints its URL and runtime directory. Use Ctrl+C to stop it.
+
+This is not yet a replacement for the Python runtime below: legacy activation
+routes and complete behavioral parity are still being migrated. `npm run
+test:ts` runs the TypeScript checks; the existing commands remain the baseline.
+The TypeScript server SDK is the intended successor to the Python SDK and is a
+breaking change for consumers. Its outbox uses Node's synchronous, experimental
+`node:sqlite`; applications must measure its effect on their event loop.
+
+For an isolated read-only Adapty seeded-data run, set `RECONCILE_LIVE_CONFIG`
+to the existing private live configuration before `npm run start:ts`. The
+provider reads profiles through the API; it does not seed or write to Adapty.
+Local fault injection is disabled in this mode. Seeded purchases are synthetic
+and do not establish payment or real revenue.
+
 An Adapty add-on demo that connects an observed purchase to application access,
 detects unapplied entitlements proactively, restores existing rights when current
 evidence supports it, and shows the verified result with its time.

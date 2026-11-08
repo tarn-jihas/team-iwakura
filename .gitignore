@@ -11,3 +11,7 @@ reconcile-mock-first-kit/runtime/live-adapty/
 *.sqlite3-shm
 Reconcile/.openai/
 .artifacts/
+node_modules/
+apps/*/dist/
+packages/*/dist/
+/runtime/typescript/
