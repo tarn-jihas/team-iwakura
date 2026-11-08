@@ -32,6 +32,31 @@ test('polling restores the filter submit button focus', async t => {
   assert.ok(restored>0);
 });
 
+test('a slow trace read does not stop future monitor polls', async t => {
+  const timers = new Map();
+  let timerId = 0, resolveTrace, monitorReads = 0;
+  t.mock.method(globalThis, 'setTimeout', (callback, delay) => {
+    const id = ++timerId; timers.set(id, {callback, delay}); return id;
+  });
+  t.mock.method(globalThis, 'clearTimeout', id => timers.delete(id));
+  const runPoll = async () => {
+    const [id, timer] = [...timers].find(([, value]) => value.delay === 2000) || [];
+    assert.ok(timer, 'a future monitor poll must be scheduled');
+    timers.delete(id); await timer.callback();
+  };
+  const browser = await browserHarness(t, async url => {
+    if (url.endsWith('/trace')) return new Promise(resolve => { resolveTrace = resolve; });
+    if (url.startsWith('/api/recovery/monitor')) monitorReads++;
+    return response(feed('idle'));
+  });
+  const trace = browser.click('trace', {id:'incident-1'});
+  await runPoll();
+  assert.equal(monitorReads, 1);
+  resolveTrace(response({accounts:[]})); await trace;
+  await runPoll();
+  assert.equal(monitorReads, 2);
+});
+
 async function browserHarness(t, fetcher, inputs = []) {
   const listeners = {root:{},document:{},window:{}};
   const root = {innerHTML:'',querySelectorAll:selector=>selector === 'input[name]' ? inputs : [],querySelector:()=>null,
@@ -105,13 +130,31 @@ test('invalid UTC range shows an error without requesting an export', async t =>
   assert.match(browser.root.innerHTML,/From is earlier than To/);
 });
 
-test('monitor requests every status so the attention box and live feed are both complete', async t => {
+test('monitor loads bounded all activity and follows the API cursor', async t => {
   const urls = [];
-  await browserHarness(t, async(url, options)=>{ urls.push(url); return response(feed('idle')); });
-  const monitor = new URL(urls.find(url=>url.startsWith('/api/recovery/monitor')), 'http://local');
-  assert.equal(monitor.searchParams.get('cursor'),'0');
-  assert.equal(monitor.searchParams.get('limit'),'200');
-  assert.equal(monitor.searchParams.get('status'),null);
+  const browser = await browserHarness(t, async(url, options)=>{
+    urls.push(url);
+    return response({...feed('idle'), pagination:{cursor:urls.length===1?'0':'50',limit:50,next_cursor:urls.length===1?'50':null,total:201}});
+  });
+  const initial = new URL(urls.find(url=>url.startsWith('/api/recovery/monitor')), 'http://local');
+  assert.equal(initial.searchParams.get('cursor'),'0');
+  assert.equal(initial.searchParams.get('limit'),'50');
+  assert.equal(initial.searchParams.get('status'),null);
+  await browser.click('page',{page:'1'});
+  const next = new URL(urls.filter(url=>url.startsWith('/api/recovery/monitor'))[1], 'http://local');
+  assert.equal(next.searchParams.get('cursor'),'50');
+  assert.equal(next.searchParams.get('limit'),'50');
+});
+
+test('filter changes reset pagination and request needs attention directly', async t => {
+  const urls = [];
+  const browser = await browserHarness(t, async(url, options)=>{ urls.push(url); return response({...feed('idle'),pagination:{cursor:'0',limit:50,next_cursor:null,total:0}}); });
+  const form = {dataset:{form:'filters'},elements:{status:{value:'needs_attention'}}};
+  await browser.listeners.root.submit({target:{closest:()=>form},preventDefault(){}});
+  const filtered = new URL(urls.filter(url=>url.startsWith('/api/recovery/monitor')).at(-1), 'http://local');
+  assert.equal(filtered.searchParams.get('cursor'),'0');
+  assert.equal(filtered.searchParams.get('limit'),'50');
+  assert.equal(filtered.searchParams.get('status'),'needs_attention');
 });
 
 test('manual mode skips live fulfillment polling', async t => {
@@ -135,6 +178,58 @@ test('automatic mock mode Run starts one run through the simulation endpoint', a
   assert.ok(run);
   assert.equal(JSON.parse(run.options.body).action,'once');
   assert.ok(!calls.some(call=>call.url === '/api/recovery/lumen/export'));
+});
+
+test('FULL_MOCK traffic waits six seconds, uses once, and Stop cancels the next run', async t => {
+  const timers = new Map();
+  let timerId = 0;
+  t.mock.method(globalThis, 'setTimeout', (callback, delay) => {
+    const id = ++timerId; timers.set(id, {callback, delay}); return id;
+  });
+  t.mock.method(globalThis, 'clearTimeout', id => timers.delete(id));
+  const calls = [];
+  const browser = await browserHarness(t, async(url, options={})=>{
+    calls.push({url,options});
+    if (url.startsWith('/api/recovery/monitor')) return response({...feed('idle'),mode:'FULL_MOCK',automation:{enabled:true}});
+    if (url.startsWith('/api/recovery/fulfillments')) return response({items:[]});
+    return response({status:'accepted'});
+  });
+  assert.equal(calls.filter(call=>call.options.method === 'POST').length, 0);
+  assert.ok([...timers.values()].some(timer=>timer.delay === 6000));
+  await browser.click('demo-traffic');
+  assert.equal(calls.filter(call=>call.options.method === 'POST').length, 0);
+  assert.doesNotMatch(browser.root.innerHTML, /Synthetic demo traffic · On/);
+
+  await browser.click('demo-traffic');
+  const [id, timer] = [...timers].find(([,value])=>value.delay === 6000) || [];
+  assert.ok(timer, 'turning traffic on schedules the first scenario after six seconds');
+  timers.delete(id);
+  await timer.callback();
+  const posts = calls.filter(call=>call.options.method === 'POST');
+  assert.equal(posts.length, 1);
+  assert.equal(JSON.parse(posts[0].options.body).action, 'once');
+  await browser.click('demo-traffic');
+  assert.equal(calls.filter(call=>call.options.method === 'POST').length, 1);
+});
+
+test('FULL_MOCK traffic does not schedule while telemetry is queued or repair is active', async t => {
+  const timers = new Map();
+  let timerId = 0;
+  t.mock.method(globalThis, 'setTimeout', (callback, delay) => {
+    const id = ++timerId; timers.set(id, {callback, delay}); return id;
+  });
+  t.mock.method(globalThis, 'clearTimeout', id => timers.delete(id));
+  const busy = {...feed('idle'),mode:'FULL_MOCK',automation:{enabled:true},telemetry:{queued:1},
+    incidents:[{id:'incident-1',status:'repairing'}]};
+  const calls = [];
+  await browserHarness(t, async(url, options={})=>{
+    calls.push({url,options});
+    if (url.startsWith('/api/recovery/monitor')) return response(busy);
+    if (url.startsWith('/api/recovery/fulfillments')) return response({items:[]});
+    return response({status:'accepted'});
+  });
+  assert.ok(![...timers.values()].some(timer=>timer.delay === 6000));
+  assert.equal(calls.filter(call=>call.options.method === 'POST').length, 0);
 });
 
 test('browser back-forward restoration resumes monitoring and actions', async t => {

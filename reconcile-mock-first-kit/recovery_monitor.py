@@ -3,6 +3,8 @@ from datetime import datetime, timezone
 import json
 
 import recovery_domain as domain
+import recovery_live
+import recovery_scenarios
 
 
 def _time(value):
@@ -22,6 +24,10 @@ def _cause(snapshot, incident):
     if not accounts:
         return ('Access problem needs investigation',
                 'The scan did not confirm an account with current source-backed access, so no cause or repair is claimed.')
+    if all(account.get('payment_state') == 'paid' and account.get('adapty_active') is False
+           for account in accounts):
+        return ('Purchase recorded, but access was not activated',
+                'At detection, provider records showed a current paid period, but the matching Adapty access was missing. The product-mapping and purchase-validation checks below show the recovery result.')
     local = [clients.get(row['id'], {}) for row in accounts]
     gates = [row.get('gate', {}) for row in local]
     observed = set()
@@ -42,16 +48,16 @@ def _cause(snapshot, incident):
         return ('Lumen access period differs from Adapty',
                 'The local period does not match the current source period, even though access is still allowed. No customer denial is claimed.')
     if observed == {'projection'}:
-        return ('Lumen access was not projected',
-                'Adapty showed current access while Lumen had no active local projection. This is correlated local delivery evidence, not proof of the original cause.')
+        return ('Lumen had not applied subscription access',
+                'At detection, Adapty showed active subscription access, but Lumen had not saved it for these accounts. The recorded checks show what happened next.')
     if any(row.get('reason') == 'cache_stale' for row in gates):
-        return ('Lumen cache was stale',
-                'Adapty showed current access while Lumen denied export on a stale cache. This is correlated local delivery evidence, not proof of the original cause.')
+        return ('Lumen checked an outdated copy of access',
+                'At detection, Adapty showed active access, but Lumen used an outdated cached value and denied Premium export.')
     if any(row.get('reason') == 'subscription_expired' for row in gates):
-        return ('Lumen had an older entitlement expiry',
-                'Adapty showed current access while Lumen evaluated an earlier local expiry. This is correlated local delivery evidence, not proof of the original cause.')
-    return ('Lumen denied access despite current source evidence',
-            'The scan found current Adapty entitlements and denied Lumen gates. The observed evidence does not establish a more specific cause.')
+        return ('Lumen used an outdated subscription expiry',
+                'At detection, the subscription was active in Adapty, but Lumen used an earlier expiry date and denied Premium export.')
+    return ('Active subscription, but Premium access was denied',
+            'The scan confirmed active Adapty access and a denied Premium request in Lumen. The checks have not identified a more specific cause.')
 
 
 STEP_LABELS = {
@@ -93,12 +99,41 @@ def _action_reason(action):
     return _reason(result.get('reason') or result.get('error'))
 
 
-def _timeline(row, incident, snapshot, decisions, plans, actions_by_id, sdk_events):
+def _timeline(row, incident, snapshot, decisions, plans, actions_by_id, sdk_events, trigger_event):
     """Readable, ordered recovery steps built only from durable engine records."""
-    steps = [{'step': 'Customer denied at the Lumen gate', 'owner': 'Lumen SDK',
-              'status': 'ok', 'at': row['created_at'],
-              'detail': f"{incident.get('trigger_user_id') or 'A customer'} was refused premium export; "
-                        'the signed SDK event opened this incident.'}]
+    if trigger_event is None:
+        if incident.get('trigger_event_id'):
+            first_step = {'step': 'Trigger event unavailable', 'owner': 'Reconcile',
+                'status': 'failed', 'at': row['created_at'],
+                'detail': 'The incident references a trigger event that is not available in its stored run scope.'}
+        else:
+            first_step = {'step': 'Incident opened manually', 'owner': 'Reconcile',
+                'status': 'ok', 'at': row['created_at'],
+                'detail': 'No triggering customer event is recorded for this incident.'}
+    else:
+        event_kind = trigger_event.get('kind')
+        details = trigger_event.get('details') or {}
+        at = trigger_event.get('occurred_at')
+        if (event_kind == 'feature_access_decided' and details.get('decision') == 'deny'
+                and details.get('initiator') == 'customer_demo'):
+            first_step = {'step': 'Customer denied at the Lumen gate', 'owner': 'Lumen SDK',
+                'status': 'ok', 'at': at,
+                'detail': f"Collector stored a Lumen access denial for {trigger_event.get('app_user_id') or 'a customer'}; "
+                          'this event opened the incident.'}
+        elif event_kind == 'mobile_observation' and details.get('observation_kind') == 'purchase_succeeded':
+            first_step = {'step': 'Purchase success was reported', 'owner': 'Customer observation',
+                'status': 'ok', 'at': at,
+                'detail': 'The mobile observation reported purchase_succeeded; payment was not independently verified.'}
+        elif event_kind == 'mobile_observation' and details.get('observation_kind') == 'access_denied':
+            first_step = {'step': 'Access denial was reported', 'owner': 'Customer observation',
+                'status': 'ok', 'at': at,
+                'detail': 'The mobile observation reported an access denial; it does not establish a Lumen gate decision.'}
+        else:
+            first_step = {'step': 'Incident trigger recorded', 'owner': 'Collector',
+                'status': 'ok', 'at': at,
+                'detail': f"Collector stored {event_kind or 'an event'} ({trigger_event.get('event_id')}); "
+                          'the event opened this incident.'}
+    steps = [first_step]
     if snapshot is None:
         steps.append({'step': 'Scan all accounts', 'owner': 'Reconcile', 'status': 'running',
                       'at': None, 'detail': 'Collecting payment, Adapty and Lumen evidence.'})
@@ -109,10 +144,11 @@ def _timeline(row, incident, snapshot, decisions, plans, actions_by_id, sdk_even
     total = sum(counts.values())
     steps.append({'step': 'Scan all accounts', 'owner': 'Reconcile', 'status': 'ok', 'at': None,
                   'detail': f"{total} accounts checked · {counts.get('confirmed', 0)} confirmed broken · "
-                            f"{counts.get('inconclusive', 0)} inconclusive (never written) · "
+                            f"{counts.get('inconclusive', 0)} excluded until source or identity is confirmed · "
                             f"{total-counts.get('confirmed', 0)-counts.get('inconclusive', 0)} not affected"})
     plans_by_id = {plan['id']: plan for plan in plans}
     failure = None
+    probe_attempts = []
     for decision in decisions:
         selected = json.loads(decision.get('selected_ids') or '[]')
         try:
@@ -138,6 +174,12 @@ def _timeline(row, incident, snapshot, decisions, plans, actions_by_id, sdk_even
                 for entry in entries:
                     action = actions_by_id.get(entry['id'])
                     status = action['status'] if action else 'pending'
+                    if kind == 'verify_gate' and action and action.get('started_at'):
+                        result = json.loads(action['result']) if action.get('result') else {}
+                        probe_attempts.append({'account': entry.get('account_id'),
+                            'action_id': entry['id'], 'at': action['started_at'],
+                            'status': status, 'request': result.get('probe_trace'),
+                            'readback': result.get('readback_gate'), 'reason': _action_reason(action)})
                     if status == 'verified':
                         done += 1
                     elif status in ('failed', 'blocked', 'unknown_outcome'):
@@ -170,6 +212,11 @@ def _timeline(row, incident, snapshot, decisions, plans, actions_by_id, sdk_even
         # Counted once for the whole incident, after any retry.
         gate_steps[-1]['detail'] += (f" · collector received {sdk_events['probe_allow']} gate allows "
                                      'for this incident in total')
+    if failure and failure.get('accounts'):
+        account = failure['accounts'][0]['account']
+        failure['trace'] = {'account': account,
+            'attempts': [attempt for attempt in probe_attempts if attempt['account'] == account],
+            'affected_count': len(failure['accounts'])}
     return steps, failure
 
 
@@ -229,12 +276,27 @@ def build(engine, cursor=None, limit=None, status=None):
         simulation = {'status': 'idle', 'completed': 0, 'total': 0, 'error': None}
 
     db = domain.connect(engine.db_path)
+    trigger_events = {}
     try:
         incident_sql = 'SELECT id,incident_json,created_at FROM incidents ORDER BY created_at DESC,rowid DESC'
         incidents = [dict(row) for row in db.execute(incident_sql)]
         incident_ids = [row['id'] for row in incidents]
         if incident_ids:
             marks = ','.join('?' for _ in incident_ids)
+            trigger_incidents = {}
+            for incident_row in incidents:
+                incident_data = json.loads(incident_row['incident_json'])
+                if incident_data.get('trigger_event_id'):
+                    trigger_incidents[incident_data['trigger_event_id']] = incident_data
+            if trigger_incidents:
+                trigger_marks = ','.join('?' for _ in trigger_incidents)
+                for trigger_row in db.execute('SELECT event_json FROM collector_events WHERE event_id IN ('+
+                                              trigger_marks+')', list(trigger_incidents)):
+                    event = json.loads(trigger_row['event_json'])
+                    incident_data = trigger_incidents.get(event.get('event_id'))
+                    if incident_data and all(event.get(key) == incident_data.get(key)
+                                             for key in ('run_id', 'app', 'environment')):
+                        trigger_events[incident_data['id']] = event
             # The feed needs diagnosis fields, not every immutable source profile.
             snapshots = {row['id']: {
                 'manifest': json.loads(row['manifest_json'] or '{}'),
@@ -409,8 +471,11 @@ def build(engine, cursor=None, limit=None, status=None):
         detected, repaired_time = _time(detected_at), _time(repaired_at)
         duration_ms = (max(0, round((repaired_time-detected).total_seconds()*1000))
                        if detected and repaired_time else None)
-        provenance = (snapshot or {}).get('manifest', {}).get('provenance')
-        payment = (snapshot or {}).get('manifest', {}).get('payment_verification')
+        snapshot_manifest = (snapshot or {}).get('manifest', {})
+        provenance = snapshot_manifest.get('provenance')
+        payment = snapshot_manifest.get('payment_verification') or (
+            recovery_live.PAYMENT_VERIFICATION
+            if provenance == recovery_scenarios.PROVENANCE else None)
         if status == 'repaired':
             next_step = 'None. Lumen access was verified.'
         elif status == 'unresolved':
@@ -431,26 +496,38 @@ def build(engine, cursor=None, limit=None, status=None):
         elif assessment_failed:
             summary = 'No repair was attempted because the incident scan failed.'
         else:
-            summary = 'No safe account had a verified Lumen gate after recovery.' if affected else 'No safe repair target was confirmed.'
+            summary = 'No final Premium access check passed after recovery.' if affected else 'The checks did not confirm an account eligible for repair.'
         timeline, failure = None, None
         if not live:
-            run_id = incident.get('run_id')
+            scoped_sdk_rows = [event for event in sdk_rows if all(event.get(key) == incident.get(key)
+                for key in ('run_id', 'app', 'environment'))]
             affected_set = set(affected)
-            sdk_events = {'access_projection_changed': sum(1 for event in sdk_rows
-                    if event.get('run_id') == run_id and event.get('kind') == 'access_projection_changed'
+            sdk_events = {'access_projection_changed': sum(1 for event in scoped_sdk_rows
+                    if event.get('kind') == 'access_projection_changed'
                     and event.get('app_user_id') in affected_set),
-                'probe_allow': sum(1 for event in sdk_rows
-                    if event.get('run_id') == run_id and event.get('kind') == 'feature_access_decided'
+                'probe_allow': sum(1 for event in scoped_sdk_rows
+                    if event.get('kind') == 'feature_access_decided'
                     and (event.get('details') or {}).get('initiator') == 'reconcile_probe'
                     and (event.get('details') or {}).get('decision') == 'allow')}
             actions_by_plan = {action['id']: action for action in actions}
             timeline, failure = _timeline(row, incident, snapshot, incident_decisions,
-                                          incident_plans, actions_by_plan, sdk_events)
+                                          incident_plans, actions_by_plan, sdk_events,
+                                          trigger_events.get(row['id']))
             if status == 'unresolved' and failure is None:
                 failure = {'step': 'Scan all accounts' if assessment_failed else 'Automatic recovery',
                            'owner': 'Reconcile', 'accounts': [], 'reason': next_step}
             if status != 'unresolved':
                 failure = None
+            if (failure and failure['step'] == 'Verify the premium gate'
+                    and failure.get('accounts') and all(account.get('reason') ==
+                        'independent gate probe unavailable' for account in failure['accounts'])):
+                title = 'Premium access verification unavailable'
+                summary = (f'Lumen resync succeeded for {len(resynced_accounts)} accounts; '
+                           f'access remains unverified for {len(failure["accounts"])} accounts '
+                           'because the independent gate probe was unavailable.')
+                next_step = ('Check Lumen gate-probe availability and connectivity, then retry '
+                             'verification for the listed accounts. The failed probe does not establish denied access.')
+                failure['reason'] = 'Gate verification was unavailable after the automatic retry; current access is unknown.'
         feed.append({'id': row['id'], 'title': title, 'description': description,
             **({} if live else {'timeline': timeline, 'failure': failure}),
             'status': status, 'affected_accounts': len(affected),

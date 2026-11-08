@@ -42,6 +42,68 @@ class FulfillmentBackendTests(unittest.TestCase):
                 'product_id', 'expires_at', 'entitlement_hash', 'transaction_id',
                 'source_fingerprint', 'store', 'source_environment')}}
 
+    def test_mock_fulfillments_require_matching_active_source_and_allowed_gate(self):
+        user_id, transaction_id = 'u00001', 'txn-u00001'
+        evidence = {'user_id':user_id, 'provider_customer_id':'cust-u00001',
+            'transaction_id':transaction_id, 'product_id':'premium.annual',
+            'starts_at':'2026-01-01T00:00:00Z', 'expires_at':'2027-01-01T00:00:00Z',
+            'observed_at':'2026-06-01T00:00:00Z',
+            'evidence_hash':'a'*64, 'provenance':'synthetic_extension'}
+        profile = {'status':'active', 'product_id':evidence['product_id'],
+            'expires_at':evidence['expires_at']}
+        expected_hash = service.digest({'user_id':user_id,
+            'product_id':evidence['product_id'], 'expires_at':evidence['expires_at']})
+        client = {'access_active':True, 'access_expires_at':evidence['expires_at'],
+            'entitlement_hash':expected_hash, 'gate':{'allowed':False,'reason':'subscription_inactive'}}
+        engine = object.__new__(service.RecoveryService)
+        engine.live_config = None
+        engine.demo = True
+        engine.role = 'engine'
+        engine.db_path = self.root / 'fulfillments.sqlite3'
+        db = sqlite3.connect(engine.db_path)
+        db.execute('CREATE TABLE collector_events(event_json TEXT)')
+        db.commit()
+        db.close()
+        engine.scenario_now = Mock(return_value=datetime(2026, 6, 1, tzinfo=timezone.utc))
+        engine._mutation_lock = threading.RLock()
+        engine._observations = Mock(return_value={'evidence_by_id':{user_id:[evidence]},
+            'profiles_by_id':{user_id:profile}, 'clients_by_id':{user_id:client},
+            'scope_ids':[user_id],
+            'complete':True,'gaps':[],'observed_at':'2026-01-01T00:00:00Z'})
+        engine._manifest = Mock(return_value={'app':'mock-lumen-activation'})
+        engine._live_processing_receipts = Mock(return_value=set())
+
+        item = engine._fulfillments()['items'][0]
+        self.assertEqual(item['stages'], {'source_recorded':'recorded',
+            'application_applied':'applied', 'access_verified':'unknown'})
+        self.assertEqual(item['status'], 'discrepancy')
+
+        profile['status'] = 'missing'
+        client['gate']['allowed'] = True
+        item = engine._fulfillments()['items'][0]
+        self.assertEqual(item['stages'], {'source_recorded':'unknown',
+            'application_applied':'unknown', 'access_verified':'unknown'})
+        self.assertEqual(item['status'], 'discrepancy')
+        self.assertEqual(item['display_label'], 'Activation missing')
+
+        profile['status'] = 'active'
+        item = engine._fulfillments()['items'][0]
+        self.assertEqual(item['stages']['access_verified'], 'verified')
+        self.assertEqual(item['status'], 'verified_application')
+        self.assertEqual(engine._fulfillments(status='discrepancy')['items'], [])
+        self.assertIsNone(engine._fulfillments()['pagination']['next_cursor'])
+
+        evidence['expires_at'] = '2026-05-31T00:00:00Z'
+        item = engine._fulfillments()['items'][0]
+        self.assertEqual(item['access_state'], 'discrepancy')
+        self.assertNotEqual(item['stages']['access_verified'], 'verified')
+        client['gate'] = {'allowed':False,'reason':'subscription_expired'}
+        item = engine._fulfillments()['items'][0]
+        self.assertEqual(item['access_state'], 'expired')
+        self.assertEqual(item['display_label'], 'Subscription expired')
+        client['gate'] = {'allowed':False,'reason':'policy_restricted'}
+        self.assertEqual(engine._fulfillments()['items'][0]['access_state'], 'policy_restricted')
+
     def test_pending_demo_exposes_bootstrap_until_initial_replay_finishes(self):
         harness = LiveHarness(self.root, pending=True)
         self.addCleanup(harness.close)

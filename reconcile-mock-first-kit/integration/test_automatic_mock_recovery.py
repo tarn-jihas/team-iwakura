@@ -65,10 +65,43 @@ class AutomaticMockRecoveryTests(unittest.TestCase):
         self.assertNotEqual(first['run_id'], second['run_id'])
         self.assertEqual(feed['summary'], {'incidents': 2, 'fixed': 2, 'needs_attention': 0,
                                            'affected_accounts': 48})
+        code, access = self.call('/api/recovery/fulfillments?limit=100')
+        self.assertEqual(code, 200)
+        self.assertEqual(access['pagination']['total'], 100)
+        self.assertEqual(collections.Counter(row['access_state'] for row in access['items']),
+            {'verified':84, 'expired':6, 'policy_restricted':4, 'inconclusive':6})
+        by_user = {row['user_id']:row for row in access['items']}
+        self.assertEqual(by_user['u00084']['display_label'], 'Subscription expired')
+        self.assertEqual(by_user['u00090']['display_label'], 'Blocked by app rule')
+        self.assertIn('does not override', by_user['u00090']['reason'])
+        self.assertIn('intentional', by_user['u00090']['next_step'])
+        self.assertEqual(by_user['u00094']['display_label'], 'Identity not mapped')
+        self.assertEqual(by_user['u00097']['display_label'], 'Source stale')
+        self.assertEqual(by_user['u00098']['display_label'], 'Source unavailable')
+        self.assertTrue(all(not by_user[f'u{i:05}']['telemetry_gap'] for i in range(24)))
         for incident in feed['incidents']:
             self.assertEqual((incident['status'], incident['repaired_accounts']), ('repaired', 24))
             self.assertIsNone(incident['failure'])
             self.assertTrue(all(step['status'] in ('ok', 'failed') for step in incident['timeline']))
+            self.assertEqual(incident['source_provenance'], 'synthetic_extension')
+            self.assertEqual(incident['payment_verification'], 'not_independently_verified')
+        db = sqlite3.connect(f"file:{self.demo.runtime / 'engine.sqlite3'}?mode=ro", uri=True)
+        try:
+            snapshots = [json.loads(row[0]) for row in db.execute('SELECT snapshot_json FROM snapshots')]
+        finally:
+            db.close()
+        self.assertTrue(snapshots)
+        for snapshot in snapshots:
+            scope = tuple(snapshot['incident'][key] for key in ('run_id', 'app', 'environment'))
+            self.assertEqual(tuple(snapshot['manifest'][key] for key in ('run_id', 'app', 'environment')), scope)
+            self.assertEqual(snapshot['manifest']['payment_verification'], 'not_independently_verified')
+            self.assertTrue(all(tuple(event[key] for key in ('run_id', 'app', 'environment')) == scope
+                                for event in snapshot['historical_events']))
+        status, exported = self.call('/api/recovery/export?format=json')
+        self.assertEqual(status, 200)
+        self.assertEqual(exported['provenance']['payment_verification'], 'not_independently_verified')
+        self.assertTrue(all(snapshot['manifest']['payment_verification'] == 'not_independently_verified'
+                            for incident in exported['incidents'] for snapshot in incident['snapshots']))
         status, gate = self.call('/api/recovery/lumen/export', {'user_id': 'u00000'})
         self.assertEqual((status, gate['allowed']), (200, True))
 
@@ -107,6 +140,20 @@ class AutomaticMockRecoveryTests(unittest.TestCase):
         self.assertEqual(feed['summary']['needs_attention'], 1)
         self.assertEqual(incident['failure']['step'], 'Verify the premium gate')
         self.assertEqual(incident['failure']['owner'], 'Lumen')
+        self.assertEqual(incident['title'], 'Premium access verification unavailable')
+        self.assertIn('Lumen resync succeeded for 24 accounts', incident['repair_summary'])
+        self.assertIn('availability and connectivity', incident['next_step'])
+        self.assertIn('current access is unknown', incident['failure']['reason'])
+        trace = incident['failure']['trace']
+        self.assertEqual((trace['account'], trace['affected_count']), ('u00000', 24))
+        self.assertEqual(len(trace['attempts']), 2)
+        for attempt in trace['attempts']:
+            self.assertEqual(attempt['request']['http_status'], 503)
+            self.assertEqual(attempt['request']['path'], '/internal/lumen/probe')
+            self.assertEqual(attempt['request']['method'], 'POST')
+            self.assertGreaterEqual(attempt['request']['duration_ms'], 0)
+            self.assertTrue(attempt['action_id'])
+        self.assertTrue(trace['attempts'][-1]['readback']['allowed'])
         self.assertIn('u00000', {item['account'] for item in incident['failure']['accounts']})
         self.assertIn('failed', {step['status'] for step in incident['timeline']})
 

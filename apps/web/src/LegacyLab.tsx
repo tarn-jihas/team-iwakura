@@ -33,15 +33,15 @@ export function LegacyLab() {
   useEscapeToCloseNav(state.navOpen, () => patch({ navOpen: false }));
   const allCases = () => [...state.cases, ...state.customCases, ...(state.storeCase ? [state.storeCase] : [])];
   const rowsFor = (id: string) => Array.isArray(state.history[id]) ? state.history[id] : [];
-  function persist(selectedCaseId = current?.id) {
-    try { localStorage.setItem(STORAGE_KEY, JSON.stringify({ reviews: state.reviews, history: state.history, customCases: state.customCases, selectedCaseId })); }
+  function persist(selectedCaseId = current?.id, customCases = state.customCases, history = state.history) {
+    try { localStorage.setItem(STORAGE_KEY, JSON.stringify({ reviews: state.reviews, history, customCases, selectedCaseId })); }
     catch { notify('Browser storage is unavailable. This session still works; export your case to keep it.', true); }
   }
-  function addRun(result: Data, initial = false) {
-    const oldRows = rowsFor(result.id);
+  function addRun(result: Data, initial = false, history = state.history) {
+    const oldRows = Array.isArray(history[result.id]) ? history[result.id] : [];
     if (initial && oldRows[0]?.snapshot?.fingerprint === result.fingerprint) return oldRows[0];
     const run = { id: `run-${Date.now().toString(36)}-${Math.random().toString(36).slice(2,6)}`, at: result.computed_at, snapshot: clone(result) };
-    state.history[result.id] = [run, ...oldRows].slice(0, 20);
+    history[result.id] = [run, ...oldRows].slice(0, 20);
     return run;
   }
   function openCase(id: string) {
@@ -103,8 +103,11 @@ export function LegacyLab() {
     }
     const result = clone(dialog.preview);
     if (!result) return;
-    patch({ customCases: [...state.customCases, result] }); addRun(result); persist(result.id);
-    patch({ import: null, overlay: null }); openCase(result.id); notify('Case created. Inputs, scope and computed result saved locally.');
+    const customCases = [...state.customCases, result], history = { ...state.history };
+    const run = addRun(result, false, history);
+    persist(result.id, customCases, history);
+    patch({ customCases, history, page: 'case', navOpen: false, current: clone(run.snapshot), activeRunId: run.id, tab: 'findings', findingSearch: '', findingFilter: 'all', operationFilter: 'all', import: null, overlay: null });
+    window.scrollTo(0,0); requestAnimationFrame(() => document.querySelector<HTMLElement>('#main-content')?.focus({ preventScroll: true })); notify('Case created. Inputs, scope and computed result saved locally.');
   }
   async function action(name: string, extra: Data = {}) {
     if (name === 'navigate') navigate(extra.page as Page);

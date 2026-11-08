@@ -1,203 +1,155 @@
-# Reconcile · local hackathon demo
+# Reconcile
 
-[AI Usage & Development Log](docs/AI_USAGE_DEVELOPMENT_LOG.md)
+**Connect an Adapty entitlement to verified Premium access in the application.**
 
-## TypeScript migration in progress
+Reconcile is an Adapty hackathon prototype for subscriptions that are recorded
+but not fulfilled by the application's backend. It compares source entitlements
+with application state, finds missing or stale access, resyncs supported existing
+rights, and checks the same authorization decision as the Premium endpoint.
 
-The isolated TypeScript/Preact runtime is available for development with Node
-22.22.3: `npm run build:ts`, then `npm run start:ts`. It starts on port 8768
-with new databases under `runtime/typescript/` and leaves existing demo data and
-the original hackathon seeders untouched. `ENGINE_PORT=0` requests a free port;
-the launcher prints its URL and runtime directory. Use Ctrl+C to stop it.
+The local **Lumen** application demonstrates processing, projection and cache
+failures. Reconcile shows what happened, affected accounts, recovery steps and
+the verified result. Export incident activity as CSV or JSON for a UTC period.
 
-This is not yet a replacement for the Python runtime below: legacy activation
-routes and complete behavioral parity are still being migrated. `npm run
-test:ts` runs the TypeScript checks; the existing commands remain the baseline.
-The TypeScript server SDK is the intended successor to the Python SDK and is a
-breaking change for consumers. Its outbox uses Node's synchronous, experimental
-`node:sqlite`; applications must measure its effect on their event loop.
+## Quick start — complete hackathon demo
 
-For an isolated read-only Adapty seeded-data run, set `RECONCILE_LIVE_CONFIG`
-to the existing private live configuration before `npm run start:ts`. The
-provider reads profiles through the API; it does not seed or write to Adapty.
-Local fault injection is disabled in this mode. Seeded purchases are synthetic
-and do not establish payment or real revenue.
-
-An Adapty add-on demo that connects an observed purchase to application access,
-detects unapplied entitlements proactively, restores existing rights when current
-evidence supports it, and shows the verified result with its time.
-Three local HTTP processes and an
-executable Python server SDK support two explicit evidence modes:
-
-- **Full mock:** independent synthetic payment evidence → Adapty activation →
-  actual local Lumen gate. No credentials are needed.
-- **Live Adapty, seeded data:** real Adapty entitlement reads and CLI catalog
-  integration → actual Lumen SDK events → automatic local resync → real gate
-  verification. The official seed purchases remain synthetic, not payment proof.
-
-The mobile integration remains a contract and simulator. No new dependencies
-are required. Commercial value remains a [pilot hypothesis](docs/PILOT_BRIEF.md).
-
-For the connected hackathon app, use the [live Lumen demo guide](docs/LIVE_ADAPTY_DEMO.md).
-The main screen separates **Needs attention** from **Activity** and shows what
-happened, how it was repaired and when. Simulation exercises actual local Lumen
-processing. The engine checks source expectations and application state without
-waiting for a customer complaint. A bounded automatic policy authorizes existing
-local rights only. Export incident activity for a chosen UTC period as CSV or
-JSON, with detailed processing trace available on demand.
-See [the policy, research and measured SDK overhead](docs/AUTOMATIC_RECOVERY.md).
-
-## Run
-
-The implementation toolchain is Python 3.13.13 and Node 22.22.3. Python uses only
-the standard library; Node runs the JavaScript tests.
+Requires **Git, Node.js 22.22.3/npm and Python 3.13.13**. The Python runtime uses
+only its standard library. No credentials, database installation, AI key or
+dependency installation is needed for this mode.
 
 ```sh
-npm start -- --port 8875
+git clone https://github.com/tarn-jihas/team-iwakura.git reconcile
+cd reconcile
+npm start -- --mock --port 8875
 ```
 
-Open [http://127.0.0.1:8875](http://127.0.0.1:8875). Stop with Ctrl+C. The launcher
-starts provider/Adapty, Lumen and engine processes with separate SQLite state.
-Recovery is automatic: press **Run** and a customer is denied at the Lumen gate,
-the signed SDK event opens an incident, the policy approves a bounded repair and
-the same gate is checked again. Each run keeps its history in the **Live feed**;
-a repair that cannot be verified moves to **Needs attention** with the step and
-accounts where it stopped. Every incident shows a readable step-by-step trace.
+Open **[http://127.0.0.1:8875](http://127.0.0.1:8875)** and click **Run once**. A real
+local gate denial sends a signed SDK event. The engine checks 100 accounts,
+confirms 24 activation discrepancies, automatically repairs supported rights,
+and verifies all 24 gates after one bounded retry. Six inconclusive accounts
+remain excluded. Open an incident for the steps, or download CSV/JSON.
 
-When the private read-only config `reconcile-mock-first-kit/runtime/live-adapty/live-config.json`
-exists, `npm start` runs the live Adapty mode instead (see the live guide below).
-`--mock` forces the synthetic mock; `--manual` keeps the approval-gated console.
-Use `--runtime /tmp/reconcile-demo-example` for an isolated run. Demo Lab (reset,
-clock and faults) remains at `/recovery-console.html#lab`.
+In automatic mock mode, synthetic demo traffic starts while the monitor is open.
+It requests another scenario about every six seconds once the previous recovery
+settles. **Stop demo traffic** pauses new scenarios; **Run once** requests one
+scenario. Traffic pauses in hidden tabs and while browsing filters or history.
+**Observed access updates** shows current synthetic source rights, application
+state and gate results; these observations do not establish real charges.
 
-Analytics and cancellation regression demos remain in Demo Lab. The standalone
-legacy server is available through `npm run start:legacy`. `npm run seed` resets
-only the legacy fixtures; it is not required for the new recovery demo.
+Each Run preserves incident history. **Needs attention** keeps unsuccessful
+verification visible; filters and pagination reach older incidents. Ctrl+C
+stops all three child services. Provider, Lumen and engine use separate SQLite
+databases. Reusing a runtime preserves its state; use a new directory and a free
+port for an isolated presentation:
 
-## Advanced payment activation demo
+```sh
+npm start -- --mock --port 0 --runtime /tmp/reconcile-demo-example
+```
 
-The mock console at `/recovery-console.html` retains **Incident → Evidence and scope → Plan → Approve and run →
-Verified result**. Payment confirmation, Adapty activation and client access are
-separate facts. An incomplete or unknown source blocks automatic repair.
+`--mock` explicitly selects synthetic evidence. Without it, `npm start` selects
+the private live Adapty configuration when available. Neither mode creates a
+real charge. Original hackathon scripts, seeders and existing databases are
+preserved; no Adapty reseed is required to run or reset this demo.
 
-The synthetic Stripe scenario contains 100 accounts: 94 evaluable, 24 with a
-confirmed activation discrepancy and six inconclusive. The verified first
-recovery verifies 24 activations and 23 gates; a new, narrowly approved retry
-verifies the remaining gate. These are recovery counts, not new revenue.
+## Connected Adapty demo
 
-See the [demo walkthrough and final verification](docs/ACTIVATION_VERIFICATION.md),
-[recovery API and responsibilities](docs/RECOVERY_API.md),
-[mobile boundary](docs/MOBILE_CONTRACT.md),
-[product rationale](docs/PAYMENT_ACTIVATION_MVP.md) and
-[pilot criteria](docs/PILOT_BRIEF.md). Native SDKs and actual store payment
-validation remain outside this iteration; the optional live mode reads Adapty
-entitlements and repairs only local Lumen state.
+The [live setup guide](docs/LIVE_ADAPTY_DEMO.md) uses the existing private
+configuration and authenticated Adapty CLI. The API reads 100 known seeded
+profiles; the CLI inspects the catalog. Local handler replay succeeds for 76
+accounts and fails for 24. Reconcile detects those failures proactively,
+verifies 23 recovered gates, and leaves one unresolved. Later healthy-account
+incidents can recover while that unresolved incident stays visible.
 
-## Retained cancellation recovery demo
+This is a prototype add-on, not an officially supported CLI plugin. Adapty
+reads are real; seed purchases are synthetic. Recovery writes only to local
+Lumen state, without charging, refunding or granting external licences.
 
-Open **Cancellation recovery**, or `/access.html`. Demonstrate the Lumen
-premium-export denial, then Detect →100/94/24/6 → Preview → Approve → Apply →
-Verify23/1 → Fresh retry → Verify24/0 → successful Lumen export. The source expiry
-stays unchanged; six inconclusive accounts remain excluded; root cause is separate.
+## TypeScript / Preact runtime
 
-See the [full access demo and API/SDK contracts](docs/PAID_ACCESS_RECOVERY.md) and
-[tested recovery evidence](docs/PAID_ACCESS_VERIFICATION.md).
+The npm workspace contains the modular-monolith engine, independent Lumen and
+provider processes, Preact frontend, contracts and TypeScript server SDK.
 
-## Demo walkthrough
+```sh
+npm ci
+npm run build:ts
+npm run start:ts
+```
 
-1. Open the analytics case and click **Detect** to save a scan.
-2. Confirm separate initial gaps: **USD +21.97**, **EUR +989.01**.
-3. Inspect **Evidence** on missing purchase/refund, duplicate and price mismatch.
-   The source price is 9.99 EUR; the raw destination price is 999.00 EUR.
-4. Under the unmapped group, review evidence and **Accept local mapping** for
-   `premium_paid_v2 → purchase`. It creates zero destination events.
-5. Click **Review & preview**. Review exact payloads, row counts, signed effects
-   and SHA-256 hashes. Check the three repair groups and explicit approval box.
-6. Click **Approve selected groups**. This writes an approval, not destination data.
-7. Click **Apply approved selection**. Four events are accepted and initially
-   pending. The visible destination totals remain unchanged until the next tick.
-8. Click **Advance mock clock**, then **Fresh read / Verify**. Mapping changes
-   and new approvals are blocked while imported events are pending visibility.
-9. Confirm **USD +11.98**, **EUR 0.00**. The ghost remains a manual investigation;
-   the sandbox exclusion remains expected. No “all resolved” claim is made.
-10. Inspect **Case receipt**, **Operations**, raw source exports and run snapshots.
-    **Export audit receipt** includes approvals, action IDs and payload hashes.
+Open **[http://127.0.0.1:8768](http://127.0.0.1:8768)**, wait for source readiness,
+then use **Run once**. The 100-account acceptance scenario verifies 23 gates and
+keeps one unresolved. **Run continuously** and **Stop simulation** control local
+fault injection. `ENGINE_PORT=0 npm run start:ts` chooses a free port. Each launch
+creates fresh isolated state under `runtime/typescript/demo-*`.
 
-**Effective metric contract:** query-time-deduped production events plus signed
-`reconcile_correction` events, separately per currency. Corrections append events;
-they never overwrite the wrong 999 EUR price or delete raw duplicate events.
-This is analytical consistency, not recovered revenue or a real store refund.
-Classification and repair are deterministic; no AI chat or model key is needed.
+**Migration status:** the main automatic flow, analytics, cancellation and
+browser fixture lab run in TypeScript. The advanced activation API and complete
+blast-radius parity remain incomplete; `/recovery-console.html` returns an
+explicit unsupported result in this runtime. Use the Python mode for that flow.
+Node 22's built-in `node:sqlite` is synchronous and experimental; the engine uses
+a worker boundary, while SDK enqueue latency must be measured by integrators.
 
-## Check
+The [TypeScript SDK](packages/server-sdk/README.md) is the intended successor to
+the retained Python SDK, with a breaking consumer migration. Its built-in HTTP
+transport currently supports loopback collectors. A native mobile SDK is not
+included; the mobile integration is a contract and simulator.
+
+## How it works
+
+**Observe → Compare → Authorize → Resync → Verify → Report**
+
+- The SDK transports signed, bounded observations through a durable outbox.
+  Application events cannot establish payment or authorize repair.
+- The engine checks source rights, identity and current application state,
+  records immutable evidence and authorizes an exact plan under a bounded policy.
+- Lumen checks identity, policy and projection revisions before committing.
+  Recovery requires readback and a fresh gate probe; a timeout stays unknown
+  until its outcome can be established.
+
+Current profiles and the known-account registry are not a complete payment
+ledger. A gate proves backend authorization, not mobile UI rendering or Premium
+service quality. No synthetic amount is reported as recovered revenue. There is
+no runtime LLM or AI chat. Commercial value remains a
+[pilot hypothesis](docs/PILOT_BRIEF.md).
+
+## Retained demos and verification
+
+In Python mode: [activation console](http://127.0.0.1:8875/recovery-console.html),
+[Demo Lab](http://127.0.0.1:8875/recovery-console.html#lab),
+[cancellation recovery](http://127.0.0.1:8875/access.html),
+[analytics](http://127.0.0.1:8875/analytics.html), and
+[browser fixture lab](http://127.0.0.1:8875/legacy.html).
+Their original walkthroughs are in [activation](docs/ACTIVATION_VERIFICATION.md),
+[access](docs/PAID_ACCESS_VERIFICATION.md) and [analytics](docs/VERIFICATION.md).
 
 ```sh
 npm test
 npm run test:integration
 npm run test:acceptance
+npm run test:ts
 npm run check:offline
-npm run check:access
-python3 reconcile-mock-first-kit/reconcile_mock.py check
 ```
 
-The test suites use isolated temporary state and loopback HTTP servers. Recovery
-acceptance starts three subprocesses and checks only public HTTP outputs, audit
-and the Lumen gate. It does not import the engine or inspect its database.
-`check:offline` verifies pinned official fixture checksums, streams all 50,000
-accounts and 29,794 transaction rows, and checks pagination invariance. Those
-records are synthetic history, not proof of real payment.
+Tests use temporary databases and loopback services. Acceptance includes a long
+local stress run; the separate TypeScript stress is an integration benchmark,
+not black-box UAT. See [benchmark instructions](apps/server/benchmarks/README.md)
+and [the final audit](docs/FINAL_HACKATHON_REVIEW.md) for results, scope and limits.
+The read-only offline check verifies pinned checksums and streams 50,000 accounts
+and 29,794 transaction rows. Those records are synthetic history.
 
-The analytics `reconcile_mock.py check` command intentionally reseeds
-the demo and leaves it repaired; run `npm run seed`
-afterwards to prepare a fresh presentation. Stop the server before running CLI
-`seed` or `check`; use the UI's Reset action while the server is running.
-The old engine's six control datasets
-and Google reference comparison remain at **Demo Lab → Open legacy fixture lab**;
-that separate browser lab is read-only with respect to the Python repair state.
+## Repository
 
-## Layout and limits
+| Path | Responsibility |
+| --- | --- |
+| `apps/web` | Preact screens and Vite build |
+| `apps/server` | Modular-monolith engine, HTTP API and reporting |
+| `apps/lumen`, `apps/provider-simulator` | Independent client and source services |
+| `packages/server-sdk`, `packages/contracts` | TypeScript SDK and versioned DTOs |
+| `reconcile-mock-first-kit` | Complete retained Python runtime and seed/replay toolkit |
+| `Reconcile` | Original frontend assets and fixture lab |
+| `docs` | Contracts, verification, limitations and development record |
 
-- `Reconcile/dist/`: editable frontend source, original design system and fonts.
-  `monitor-app.js` is the simple automatic incident feed; `recovery-app.js`
-  retains the advanced manual console; `mock-app.js` retains analytics;
-  `app.js` / `engine.js` retain the old fixture lab.
-- `reconcile-mock-first-kit/recovery_service.py`, `recovery_domain.py`:
-  separate HTTP roles, durable recovery state and isolated simulator stores.
-- `reconcile-mock-first-kit/recovery_sdk.py`: signed, versioned metadata and
-  durable bounded outbox; no payment or repair decision logic.
-- `reconcile-mock-first-kit/hackathon_data.py`, `fixtures/hackathon/`:
-  pinned provenance, checksums and streaming official synthetic data import.
-- `reconcile-mock-first-kit/reconcile_mock.py`: Decimal engine, mock providers,
-  approval/apply/readback state and loopback HTTP server.
-- `reconcile-mock-first-kit/paid_access.py`, `lumen_app.py`, `collector_sdk.py`:
-  access recovery, actual client gate and signed metadata collection.
-- `reconcile-mock-first-kit/runtime/state.json`: local mutable demo state, ignored
-  by Git; generated with `seed`. The server serves no runtime or evaluation files.
-- `reconcile-mock-first-kit/reference/`: static synthetic provider-shaped samples.
-- `docs/handoffs/`: implementation and verification context for each request.
-
-Final verification: **253 automated tests passed** (52 JavaScript, 163 Python,
-9 HTTP integration and 29 black-box acceptance), including **1,001 continuous
-local cycles across 50 isolated runtimes**, plus an actual Adapty 100-account
-replay with 23/24 restored gates, restart and further healthy-account recovery. See
-[current verification and limits](docs/AUTOMATIC_RECOVERY.md) and
-[the connected demo evidence](docs/LIVE_ADAPTY_DEMO.md).
-
-Earlier analytics, access and activation evidence remains in
-[analytics verification](docs/VERIFICATION.md),
-[access verification](docs/PAID_ACCESS_VERIFICATION.md) and
-[activation verification](docs/ACTIVATION_VERIFICATION.md), including the 50k HTTP scan.
-
-Analytics supports the fixed nine-account, one-app USD/EUR scenario. Google, Apple, Stripe,
-Amplitude, AppsFlyer, PostHog and competitor webhook examples are reference samples,
-not active payment connectors. Access recovery changes only our local Lumen
-projection and cache after fresh entitlement checks; it never grants external
-licences. The live Adapty source is read-only after the authorized official seed.
-No real store checkout, real AI, FX conversion or production accounting is implied.
-The separate937-order Revenue Bridge archive was not supplied. Original archive
-README files describe their original standalone
-versions; this README describes the integrated project.
-
-Source is maintained in `tarn-jihas/team-iwakura`; no deployment is configured.
-The retained `Reconcile/.openai` hosting metadata
-belongs to the original visual archive and is not used by this local application.
+[AI Usage & Development Log](docs/AI_USAGE_DEVELOPMENT_LOG.md) explains the tools,
+agent orchestration, automation and human review. Official fixture provenance is
+pinned to [Adapty's seed repository at `77d39ed`](https://github.com/kpotehin/adapty-seed-data-hack/tree/77d39ed807a66bbebcf24fe67c42be4fc9ef4c82).
+No production deployment is configured. Real store payments, native mobile
+integration and commercial validation remain outside this hackathon prototype.

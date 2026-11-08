@@ -1,7 +1,7 @@
 export const STATUS = {
   confirmed: ['Confirmed access failure', 'amber'], healthy: ['Healthy', 'green'],
-  legitimate_denial: ['Legitimate denial', 'plain'], policy_denial: ['Policy restriction', 'plain'],
-  inconclusive: ['Inconclusive', 'blue'], restored: ['Gate verified', 'green'],
+  legitimate_denial: ['Access denied as expected', 'plain'], policy_denial: ['Blocked by app rule', 'plain'],
+  inconclusive: ['Check source or identity', 'blue'], restored: ['Premium access confirmed', 'green'],
   pending_verification: ['Not verified', 'amber'], outside_incident: ['Not assessed in incident', 'plain'],
 };
 export function orderedAccounts(accounts, filter = 'all', query = '') {
@@ -10,12 +10,15 @@ export function orderedAccounts(accounts, filter = 'all', query = '') {
     .sort((a, b) => (priority[a.status] ?? 4) - (priority[b.status] ?? 4) || a.id.localeCompare(b.id));
 }
 export function utcInput(value) { return String(value || '').replace(/Z$/, '').slice(0, 19); }
+export function gateReasonLabel(reason) {
+  return ({ allowed: 'App allows this feature', policy_restricted: 'Blocked by app rule', identity_unavailable: 'Account identity unavailable', cache_stale: 'App access cache is out of date', subscription_expired: 'App considers the access period expired', subscription_inactive: 'App has not enabled Premium access' })[reason] || String(reason || 'Reason unavailable').replace(/[_-]+/g, ' ');
+}
 export function utcValue(value) {
   if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2})?$/.test(value)) throw new Error('Choose an incident time in UTC.');
   return value + (value.length === 16 ? ':00Z' : 'Z');
 }
 export function recoveryOutcome(recovery) {
   if (!recovery?.target_count) return ['No repair applied', 'plain'];
-  if (recovery.verified_count === recovery.target_count && recovery.unresolved_count === 0) return ['Access restored · root cause separate', 'green'];
+  if (recovery.verified_count === recovery.target_count && recovery.unresolved_count === 0) return ['Premium access confirmed', 'green'];
   return [`${recovery.verified_count || 0} verified / ${recovery.unresolved_count ?? recovery.target_count} unresolved`, 'amber'];
 }

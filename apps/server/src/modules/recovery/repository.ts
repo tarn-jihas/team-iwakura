@@ -186,13 +186,14 @@ export class RecoveryRepository {
             AND json_extract(va.value,'$.kind')='verify_gate' AND json_extract(va.value,'$.userId')=ctx.user_id
             AND (SELECT MAX(sequence) FROM action_history WHERE operation_key=v.operation_key AND status='verified')
               > (SELECT MAX(sequence) FROM action_history WHERE operation_key=w.operation_key AND status='verified')))`;
-    const proofKind = `CASE WHEN EXISTS (SELECT 1 FROM recovery_actions g JOIN recovery_plans gp ON gp.id=g.plan_id,
-      json_each(gp.plan_json,'$.actions') ga JOIN action_history gh ON gh.operation_key=g.operation_key AND gh.status='verified'
-      JOIN recovery_event_order ge ON ge.kind='action' AND ge.reference=gh.sequence
+    // Keep incident selection ahead of event-order lookups; SQLite otherwise scans global history.
+    const proofKind = `CASE WHEN EXISTS (SELECT 1 FROM recovery_actions g CROSS JOIN recovery_plans gp ON gp.id=g.plan_id,
+      json_each(gp.plan_json,'$.actions') ga CROSS JOIN action_history gh ON gh.operation_key=g.operation_key AND gh.status='verified'
+      CROSS JOIN recovery_event_order ge ON ge.kind='action' AND ge.reference=gh.sequence
       WHERE g.incident_id=i.id AND g.status='verified' AND g.operation_key=json_extract(ga.value,'$.operationKey')
         AND json_extract(ga.value,'$.kind')='verify_gate' AND json_extract(ga.value,'$.userId')=ctx.user_id
-        AND NOT EXISTS (SELECT 1 FROM fulfillment_history f JOIN fulfillment_current fc ON fc.identity_hash=f.identity_hash
-          JOIN recovery_event_order fe ON fe.kind='fulfillment' AND fe.reference=f.sequence
+        AND NOT EXISTS (SELECT 1 FROM fulfillment_history f CROSS JOIN fulfillment_current fc ON fc.identity_hash=f.identity_hash
+          CROSS JOIN recovery_event_order fe ON fe.kind='fulfillment' AND fe.reference=f.sequence
           WHERE f.incident_id=i.id AND fc.user_id=ctx.user_id AND f.status IN ('discrepancy','inconclusive','awaiting_application','excluded')
             AND fe.sequence>ge.sequence)) THEN 'own_followup' ELSE 'external' END`;
     const [inserted,,owner] = await this.storage.transaction([

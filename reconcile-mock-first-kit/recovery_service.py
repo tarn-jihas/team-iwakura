@@ -211,6 +211,12 @@ def _set_meta(db, key, value):
     domain._set_meta(db, key, value)
 
 
+def _manifest_payment_verification(manifest):
+    return manifest.get('payment_verification') or (
+        recovery_live.PAYMENT_VERIFICATION
+        if manifest.get('provenance') == recovery_scenarios.PROVENANCE else None)
+
+
 def _json(value):
     return json.dumps(value, ensure_ascii=False, separators=(',', ':'), allow_nan=False)
 
@@ -1026,7 +1032,7 @@ class RecoveryService:
             db.close()
 
     def _fulfillments(self, cursor=None, limit=50, status=None):
-        if not self.live_config:
+        if not self.live_config and not (self.demo and self.role == 'engine'):
             raise RecoveryError('Fulfillment monitoring is available only in live Adapty mode', 404)
         try:
             offset = int(cursor or 0)
@@ -1037,6 +1043,8 @@ class RecoveryService:
         allowed = {'awaiting_application','verified_application','discrepancy','inconclusive'}
         if status is not None and status not in allowed:
             raise RecoveryError('Unsupported fulfillment status')
+        if not self.live_config:
+            return self._mock_fulfillments(offset, limit, status)
         db = _conn(self.db_path)
         try:
             where, params = (' WHERE status=?', [status]) if status else ('', [])
@@ -1082,6 +1090,119 @@ class RecoveryService:
                 'status': status}, 'coverage': coverage}
         finally:
             db.close()
+
+    def _mock_fulfillments(self, offset, limit, status):
+        with self._mutation_lock:
+            observations = self._observations()
+            manifest = self._manifest()
+            items = []
+            receipt_keys = set()
+            source_rows = {}
+            for user_id in observations.get('scope_ids', observations['evidence_by_id']):
+                records = observations['evidence_by_id'].get(user_id, [])
+                source = self._latest_evidence(records)
+                source_rows[user_id] = source
+                if source:
+                    if source.get('transaction_id') and source.get('evidence_hash'):
+                        receipt_keys.add((user_id, source['transaction_id'], source['evidence_hash']))
+            receipts = self._live_processing_receipts(receipt_keys)
+            projection_users = set()
+            db = _conn(self.db_path)
+            try:
+                projection_users.update(row['user_id'] for row in db.execute(
+                    "SELECT DISTINCT json_extract(event_json,'$.app_user_id') AS user_id FROM collector_events "
+                    "WHERE json_extract(event_json,'$.kind')='access_projection_changed' "
+                    "AND json_extract(event_json,'$.run_id')=? AND json_extract(event_json,'$.app')=? "
+                    "AND json_extract(event_json,'$.environment')=?",
+                    tuple(manifest.get(key) for key in ('run_id','app','environment'))))
+            finally:
+                db.close()
+            now = self.scenario_now()
+            for user_id, source in sorted(source_rows.items()):
+                source = source or {}
+                transaction_id = source.get('transaction_id')
+                fingerprint = source.get('evidence_hash')
+                profile = observations['profiles_by_id'].get(user_id) or {}
+                client = observations['clients_by_id'].get(user_id) or {}
+                gate = client.get('gate') or {}
+                source_recorded = bool(profile.get('status') == 'active'
+                    and profile.get('product_id') == source.get('product_id')
+                    and profile.get('expires_at') == source.get('expires_at'))
+                expected_hash = digest({'user_id': user_id, 'product_id': profile.get('product_id'),
+                                        'expires_at': profile.get('expires_at')}) if source_recorded else None
+                projection_matches = bool(source_recorded and client.get('access_active') is True
+                    and client.get('access_expires_at') == profile.get('expires_at')
+                    and client.get('entitlement_hash') == expected_hash)
+                access_verified = bool(projection_matches and gate.get('allowed') is True
+                    and self._evidence_current(source, now) and self._profile_current(profile, now))
+                expired = bool(source and source.get('expires_at')
+                    and parse_time(source['expires_at']) <= now)
+                if expired and gate.get('allowed') is False and gate.get('reason') != 'policy_restricted':
+                    access_state, display_label = 'expired', 'Subscription expired'
+                    reason, next_step = 'The source subscription period has expired and the current gate denies access', 'No access repair is needed for the expired period'
+                elif gate.get('reason') == 'policy_restricted' and gate.get('allowed') is False:
+                    access_state, display_label = 'policy_restricted', 'Blocked by app rule'
+                    reason = 'Lumen blocks Premium export for this account through its app access rule. An active subscription does not override this rule.'
+                    next_step = 'If the restriction is intentional, no repair is needed. Otherwise enable Premium export for this account in Lumen and check access again.'
+                elif expired and gate.get('allowed') is True:
+                    access_state, display_label = 'discrepancy', 'Access discrepancy'
+                    reason, next_step = 'The source period expired but the current Lumen gate still allows access', 'Review the source period and current Lumen projection'
+                elif client.get('identity_status') not in (None, 'mapped'):
+                    access_state, display_label = 'inconclusive', 'Identity not mapped'
+                    reason, next_step = 'The application account is not mapped to a confirmed provider customer', 'Confirm the customer mapping before changing access'
+                elif not source:
+                    access_state, display_label = 'inconclusive', 'Source unavailable'
+                    reason, next_step = 'Provider evidence is unavailable for this account', 'Restore the provider read before changing access'
+                elif not self._source_fresh(source):
+                    access_state, display_label = 'inconclusive', 'Source stale'
+                    reason, next_step = 'The last provider observation is older than the freshness limit', 'Read fresh provider evidence before changing access'
+                elif not source_recorded:
+                    access_state, display_label = 'discrepancy', 'Activation missing'
+                    reason, next_step = 'Provider access is current but a matching active Adapty entitlement is missing', 'Check purchase validation and the product mapping'
+                elif access_verified:
+                    access_state, display_label = 'verified', 'Verified'
+                    reason, next_step = 'Source period, application projection, and gate match', 'No action needed while the gate remains allowed'
+                elif not client:
+                    access_state, display_label = 'inconclusive', 'Activation missing'
+                    reason, next_step = 'Current Lumen account was not observed', 'Read the Lumen account and gate again'
+                elif not projection_matches and gate.get('allowed') is False:
+                    access_state, display_label = 'discrepancy', 'Access discrepancy'
+                    reason, next_step = 'Current Lumen gate denied access and the projection differs from the source period', 'Compare the source period with the current Lumen projection'
+                elif not projection_matches:
+                    access_state, display_label = 'inconclusive', 'Activation missing'
+                    reason, next_step = 'Current Lumen projection does not match the source period', 'Read back the source entitlement and Lumen projection'
+                elif gate.get('allowed') is False:
+                    access_state, display_label = 'discrepancy', 'Access denied'
+                    reason, next_step = 'Current Lumen gate denied access despite a matching projection', 'Check the current Lumen gate and policy'
+                else:
+                    access_state, display_label = 'inconclusive', 'Gate result unavailable'
+                    reason, next_step = 'The current Lumen gate decision was not observed', 'Restore the Lumen gate read before changing access'
+                item_status = ('verified_application' if access_state == 'verified' else
+                    'discrepancy' if access_state == 'discrepancy' else 'inconclusive')
+                if status and status != item_status:
+                    continue
+                items.append({'user_id': user_id, 'key': {'customer_id': source.get('provider_customer_id') or user_id,
+                    'user_id': user_id,
+                    'transaction_id': transaction_id, 'app': manifest.get('app'),
+                    'access_level': (observations['profiles_by_id'].get(user_id) or {}).get('access_level_id')},
+                    'source_period': {'starts_at': source.get('starts_at'), 'expires_at': source.get('expires_at')},
+                    'source_fingerprint': fingerprint, 'status': item_status,
+                    'access_state': access_state, 'display_label': display_label,
+                    'stages': {'source_recorded': 'recorded' if source_recorded else 'unknown',
+                        'application_applied': 'applied' if projection_matches else 'unknown',
+                        'access_verified': 'verified' if access_verified else 'unknown'},
+                    'reason': reason, 'next_step': next_step,
+                    'telemetry_gap': bool(access_verified and user_id not in projection_users
+                        and (user_id, transaction_id, fingerprint) not in receipts),
+                    'provenance': source.get('provenance')})
+            total = len(items)
+            page = items[offset:offset+limit]
+            return {'items': page, 'pagination': {'cursor': str(offset), 'limit': limit,
+                'next_cursor': str(offset+len(page)) if offset+len(page) < total else None,
+                'total': total, 'status': status}, 'coverage': {
+                'complete': observations.get('complete') is True,
+                'gaps': observations.get('gaps', []), 'observed_at': observations.get('observed_at'),
+                'synthetic': True}}
 
     def _fulfillment_trace(self, incident_id):
         if not self.live_config:
@@ -1260,6 +1381,8 @@ class RecoveryService:
                 selected_expectations = expectations
             manifest = {key: _meta(db,key) for key in ('app','environment','run_id','provenance',
                 'payment_verification','seed_revision','source_environment')}
+            if not manifest.get('payment_verification'):
+                manifest['payment_verification'] = _manifest_payment_verification(manifest)
             coverage = _meta(db, 'fulfillment_coverage', {})
             records = []
             for incident_id in selected:
@@ -1270,6 +1393,11 @@ class RecoveryService:
                 incident_actions = [row for row in selected_actions if row['plan_id'] in incident_plan_ids]
                 incident_snapshots = [json.loads(row['snapshot_json']) for row in snapshots
                                       if row['incident_id'] == incident_id]
+                for snapshot in incident_snapshots:
+                    snapshot_manifest = snapshot.get('manifest') or {}
+                    payment_verification = _manifest_payment_verification(snapshot_manifest)
+                    if payment_verification and not snapshot_manifest.get('payment_verification'):
+                        snapshot_manifest['payment_verification'] = payment_verification
                 affected_ids = set(incident_data.get('confirmed_ids', []))
                 if not affected_ids:
                     affected_ids.update(account['id'] for snapshot in incident_snapshots
@@ -1459,6 +1587,7 @@ class RecoveryService:
                 'CREATE TABLE IF NOT EXISTS automatic_recovery(id TEXT PRIMARY KEY,incident_id TEXT NOT NULL,assessment_snapshot_id TEXT NOT NULL,attempt INTEGER NOT NULL,policy_id TEXT NOT NULL,status TEXT NOT NULL,selected_ids TEXT NOT NULL,auto_job_id TEXT NOT NULL,plan_id TEXT,execution_job_id TEXT,outcome_json TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,UNIQUE(incident_id,attempt),UNIQUE(incident_id,assessment_snapshot_id))',
                 'CREATE TABLE IF NOT EXISTS simulations(id TEXT PRIMARY KEY,operation_key TEXT NOT NULL UNIQUE,status TEXT NOT NULL,sequence_json TEXT NOT NULL,current_index INTEGER NOT NULL,total INTEGER NOT NULL,completed INTEGER NOT NULL,stop_requested INTEGER NOT NULL,current_incident_id TEXT,error TEXT,job_id TEXT NOT NULL UNIQUE,created_at TEXT NOT NULL,updated_at TEXT NOT NULL)',
                 'CREATE TABLE IF NOT EXISTS simulation_intents(operation_key TEXT PRIMARY KEY,simulation_id TEXT NOT NULL,cycle_no INTEGER NOT NULL,user_id TEXT NOT NULL,fault_mode TEXT NOT NULL,processing_id TEXT NOT NULL,status TEXT NOT NULL,incident_id TEXT,result_json TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL)',
+                'CREATE TABLE IF NOT EXISTS mock_runs(operation_key TEXT PRIMARY KEY,run_id TEXT NOT NULL UNIQUE,status TEXT NOT NULL,step TEXT NOT NULL,result_json TEXT,error TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL)',
                 'CREATE TABLE IF NOT EXISTS collector_events(event_id TEXT PRIMARY KEY,payload_hash TEXT NOT NULL,event_json TEXT NOT NULL,recorded_at TEXT NOT NULL,provenance TEXT NOT NULL)',
                 'CREATE TABLE IF NOT EXISTS collector_assessments(event_id TEXT PRIMARY KEY,result TEXT NOT NULL)',
                 'CREATE TABLE IF NOT EXISTS fulfillment_receipts(event_id TEXT PRIMARY KEY,user_id TEXT NOT NULL,transaction_id TEXT NOT NULL,source_fingerprint TEXT NOT NULL,trace_id TEXT NOT NULL,action_id TEXT,incident_id TEXT,steps_json TEXT NOT NULL,recorded_at TEXT NOT NULL)',
@@ -1489,6 +1618,14 @@ class RecoveryService:
                     _set_meta(db, key, value)
                 _set_meta(db, 'logical_elapsed_seconds', 0)
                 _set_meta(db, 'initialized', True)
+            manifest = domain.manifest(db)
+            payment_verification = _manifest_payment_verification(manifest)
+            if payment_verification and not manifest.get('payment_verification'):
+                _set_meta(db, 'payment_verification', payment_verification)
+            db.execute("UPDATE mock_runs SET status='not_started',error='Engine restarted while waiting for prior recovery',updated_at=? WHERE status='waiting'",
+                       (self.wall_now(),))
+            db.execute("UPDATE mock_runs SET status='unknown',error='Engine restarted during mock run',updated_at=? WHERE status NOT IN ('accepted','not_started','waiting','unknown')",
+                       (self.wall_now(),))
             db.execute("UPDATE simulations SET status='stopped',stop_requested=1,error='Interrupted by server restart',updated_at=? WHERE status='running'",
                        (self.wall_now(),))
             db.execute("UPDATE jobs SET status='failed',error='simulation_interrupted_restart',updated_at=? WHERE kind='simulation' AND status='running'",
@@ -2190,6 +2327,9 @@ class RecoveryService:
             result = []
             for row in db.execute('SELECT event_json FROM collector_events ORDER BY recorded_at'):
                 event = json.loads(row['event_json'])
+                if any(event.get(key) != incident.get(key)
+                       for key in ('run_id', 'app', 'environment')):
+                    continue
                 try:
                     occurred = parse_time(event['occurred_at'])
                 except RecoveryError:
@@ -2202,7 +2342,11 @@ class RecoveryService:
 
     def _capture_snapshot(self, incident_id, fresh_live_ids=None, *, schedule_auto=False):
         incident = self._get_incident(incident_id)
-        if (self._manifest().get('scenario') == 'live_adapty'
+        manifest = self._manifest()
+        if any(manifest.get(key) != incident.get(key)
+               for key in ('run_id', 'app', 'environment')):
+            raise RecoveryError('Cannot capture a historical incident against a different run scope', 409)
+        if (manifest.get('scenario') == 'live_adapty'
                 and not incident.get('snapshot_id') and fresh_live_ids is None):
             db = _conn(self.db_path)
             try:
@@ -2234,17 +2378,17 @@ class RecoveryService:
                     within_window = False
                 if within_window:
                     incident['cohort_signature'] = {
-                        'provider': self._manifest()['scenario'],
+                        'provider': manifest['scenario'],
                         'product_id': trigger_evidence['product_id'],
                         'price_id': trigger_evidence['price_id'],
-                        'catalog_mapped_at_incident': any(item['provider'] == self._manifest()['scenario']
+                        'catalog_mapped_at_incident': any(item['provider'] == manifest['scenario']
                             and item['product_id'] == trigger_evidence['product_id']
                             and item['price_id'] == trigger_evidence['price_id']
                             and item['status'] == 'mapped' for item in catalog_items),
                         'evidence_hash': trigger_evidence['evidence_hash'],
                     }
         history = self._collector_events(incident)
-        if self._manifest().get('scenario') == 'live_adapty' and not incident.get('cohort_signature'):
+        if manifest.get('scenario') == 'live_adapty' and not incident.get('cohort_signature'):
             trigger = next((event for event in history
                             if event.get('event_id') == incident.get('trigger_event_id')),
                            None)
@@ -2282,7 +2426,7 @@ class RecoveryService:
             coverage_gaps.append('inconclusive_account_observations')
         snapshot_id = 'snapshot-'+uuid4().hex
         snapshot = {'id': snapshot_id, 'incident_id': incident_id,
-                    'manifest': self._manifest(), 'incident': incident,
+                    'manifest': manifest, 'incident': incident,
                     'created_at': self.wall_now(),
                     'scenario_observed_at': observations['scenario_observed_at'],
                     'observation_basis': 'current_state_at_snapshot; historical_events_are_actual_received_events',
@@ -3660,11 +3804,18 @@ class RecoveryService:
                 outcomes[entry['id']] = prior['status']
                 continue
             self._save_action(entry, plan_id, 'accepted', started=True)
+            probe_started = time.monotonic()
+            probe_trace = {'method': 'POST', 'path': '/internal/lumen/probe',
+                           'observed_at': self.wall_now(), 'http_status': None}
             try:
                 gate = self._probe(entry['account_id'])
+                probe_trace['http_status'] = 200
                 status = 'verified' if gate.get('allowed') is True else 'failed'
                 result = {'allowed': bool(gate.get('allowed')), 'reason': gate.get('reason')}
-            except Exception:
+            except Exception as error:
+                probe_trace['http_status'] = error.status if isinstance(error, InternalHTTPError) else None
+                probe_trace['error_kind'] = type(error).__name__
+                probe_trace['duration_ms'] = round((time.monotonic() - probe_started) * 1000)
                 try:
                     gate = internal_request(self.key, self.lumen_url, 'GET',
                         '/internal/lumen/access?'+urlencode({'user': entry['account_id']}))
@@ -3674,6 +3825,8 @@ class RecoveryService:
                                                 'reason': gate.get('reason')}}
                 except Exception:
                     status, result = 'unknown_outcome', {'reason': 'probe_readback_unavailable'}
+            probe_trace.setdefault('duration_ms', round((time.monotonic() - probe_started) * 1000))
+            result['probe_trace'] = probe_trace
             self._save_action(entry, plan_id, status, result=result,
                               evidence_ref='lumen://probe/'+entry['account_id'])
             outcomes[entry['id']] = status
@@ -5539,70 +5692,200 @@ class RecoveryService:
             'source_calls':None if source_calls_before is None or source_calls_after is None
                 else source_calls_after-source_calls_before}
 
+    def _mock_run_record(self, operation_key):
+        db = _conn(self.db_path)
+        try:
+            row = db.execute('SELECT * FROM mock_runs WHERE operation_key=?',
+                             (operation_key,)).fetchone()
+            return None if row is None else dict(row)
+        finally:
+            db.close()
+
+    @staticmethod
+    def _mock_run_state_error(run):
+        run_id, status, step = run['run_id'], run['status'], run['step']
+        if status == 'unknown':
+            return RecoveryError(f'Mock run {run_id} has an unknown outcome at {step}; '
+                'reconcile the Provider and Lumen run, app and environment before using a new operation_key.', 503)
+        if status == 'not_started':
+            return RecoveryError(f'Mock run {run_id} did not reset either service because the prior recovery '
+                'did not settle; wait for it, then use a new operation_key.', 409)
+        if status == 'waiting':
+            return RecoveryError(f'Mock run {run_id} is waiting for the prior recovery; retry the same '
+                'operation_key after it settles.', 409)
+        return RecoveryError(f'Mock run {run_id} is still pending at {step}; retry the same operation_key '
+            'after its outcome is recorded.', 409)
+
+    def _update_mock_run(self, operation_key, status, step, *, result=None, error=None):
+        db = _conn(self.db_path)
+        try:
+            db.execute('UPDATE mock_runs SET status=?,step=?,result_json=?,error=?,updated_at=? '
+                       'WHERE operation_key=?',
+                       (status, step, None if result is None else _json(result), error,
+                        self.wall_now(), operation_key))
+        finally:
+            db.close()
+
     def _mock_run(self, body):
         if (not isinstance(body, dict) or body.get('action') != 'once'
                 or set(body) != {'action', 'operation_key'}
                 or not isinstance(body.get('operation_key'), str)
                 or not body['operation_key'].strip() or len(body['operation_key']) > 128):
             raise RecoveryError('Run fields do not match the contract')
-        # Let the previous recovery and its SDK deliveries finish before re-arming.
-        deadline = time.monotonic()+45
-        while time.monotonic() < deadline:
-            try:
-                pending = internal_request(self.key, self.lumen_url, 'GET',
-                                           '/internal/lumen/collector-coverage').get('queued', 0)
-            except Exception:
-                pending = 0
-            db = _conn(self.db_path)
-            try:
-                busy = db.execute("SELECT 1 FROM jobs WHERE status IN ('queued','running') LIMIT 1").fetchone()
-            finally:
-                db.close()
-            if not pending and not busy:
-                break
-            time.sleep(0.2)
-        else:
-            raise RecoveryError('The previous recovery is still finishing; try RUN again shortly', 409)
+        operation_key = body['operation_key'].strip()
+        previous = self._mock_run_record(operation_key)
+        if previous:
+            if previous['status'] == 'accepted' and previous['result_json']:
+                return json.loads(previous['result_json'])
+            raise self._mock_run_state_error(previous)
+
         with self._mutation_lock:
-            db = _conn(self.db_path)
-            try:
-                if db.execute("SELECT 1 FROM jobs WHERE status IN ('queued','running') LIMIT 1").fetchone():
-                    raise RecoveryError('A recovery is still running; wait for it to finish', 409)
-            finally:
-                db.close()
             current = self._manifest()
             scenario = current.get('scenario') if current.get('scenario') in ('stripe','paddle','custom') else 'stripe'
             run_id = 'activation-'+scenario+'-'+uuid4().hex[:12]
-            # Provider and Lumen get a fresh synthetic outage; incident history stays in the engine.
-            reset_body = {'scenario': scenario, 'variant': 0, 'run_id': run_id}
-            internal_request(self.key, self.provider_url, 'POST', '/internal/demo/reset', reset_body, timeout=30)
-            internal_request(self.key, self.lumen_url, 'POST', '/internal/demo/reset', reset_body, timeout=30)
-            manifest = internal_request(self.key, self.provider_url, 'GET', '/internal/manifest')
             db = _conn(self.db_path)
             try:
                 db.execute('BEGIN IMMEDIATE')
-                for key, value in manifest.items():
-                    _set_meta(db, key, value)
-                _set_meta(db, 'logical_elapsed_seconds', 0)
-                faults = [name for name in ('probe_outage', 'suppress_customer_telemetry')
-                          if domain._meta(db, 'demo_lumen_fault_'+name, False)]
+                previous = db.execute('SELECT * FROM mock_runs WHERE operation_key=?',
+                                      (operation_key,)).fetchone()
+                blocker = db.execute("SELECT * FROM mock_runs WHERE status NOT IN ('accepted','not_started') "
+                                     'ORDER BY created_at LIMIT 1').fetchone()
+                if previous is None and blocker is None:
+                    now = self.wall_now()
+                    db.execute('INSERT INTO mock_runs VALUES(?,?,?,?,?,?,?,?)',
+                        (operation_key, run_id, 'waiting', 'prior_recovery', None, None, now, now))
+                    faults = [name for name in ('probe_outage', 'suppress_customer_telemetry')
+                              if _meta(db, 'demo_lumen_fault_'+name, False)]
                 db.execute('COMMIT')
+                previous = None if previous is None else dict(previous)
+                blocker = None if blocker is None else dict(blocker)
             except Exception:
                 if db.in_transaction:
                     db.execute('ROLLBACK')
                 raise
             finally:
                 db.close()
-            for name in faults:
-                internal_request(self.key, self.lumen_url, 'POST', '/internal/demo/fault',
-                                 {'fault': name, 'active': True})
-            self._record('demo_run_started', {'run_id': manifest['run_id'],
-                                              'operation_key': body['operation_key']})
-        status, gate = self._proxy_lumen_gate({'user_id': MOCK_RUN_TRIGGER_USER})
-        if status != 403 or not gate.get('event_id'):
-            raise RecoveryError('The customer denial could not be reproduced', 503)
-        return {'status': 'accepted', 'run_id': manifest['run_id'],
-                'trigger_user_id': MOCK_RUN_TRIGGER_USER, 'event_id': gate['event_id']}
+        if previous:
+            if previous['status'] == 'accepted' and previous['result_json']:
+                return json.loads(previous['result_json'])
+            raise self._mock_run_state_error(previous)
+        if blocker:
+            raise self._mock_run_state_error(blocker)
+
+        # Reserve the operation before waiting so same-key retries never join the backlog wait.
+        deadline = time.monotonic()+45
+        while time.monotonic() < deadline:
+            try:
+                coverage = internal_request(self.key, self.lumen_url, 'GET',
+                                            '/internal/lumen/collector-coverage')
+                pending = coverage.get('queued')
+            except Exception:
+                pending = None
+            if pending == 0:
+                db = _conn(self.db_path)
+                try:
+                    busy = db.execute("SELECT 1 FROM jobs WHERE status IN ('queued','running') LIMIT 1").fetchone()
+                finally:
+                    db.close()
+                if not busy:
+                    with self._mutation_lock:
+                        db = _conn(self.db_path)
+                        try:
+                            db.execute('BEGIN IMMEDIATE')
+                            busy = db.execute("SELECT 1 FROM jobs WHERE status IN ('queued','running') LIMIT 1").fetchone()
+                            blocker = db.execute("SELECT * FROM mock_runs WHERE operation_key!=? "
+                                "AND status NOT IN ('accepted','not_started') ORDER BY created_at LIMIT 1",
+                                (operation_key,)).fetchone()
+                            if busy is None and blocker is None:
+                                db.execute("UPDATE mock_runs SET status='provider_reset_pending',step='provider_reset',updated_at=? "
+                                           "WHERE operation_key=? AND status='waiting'",
+                                           (self.wall_now(), operation_key))
+                            elif blocker:
+                                db.execute("UPDATE mock_runs SET status='not_started',step=?,error=?,updated_at=? "
+                                    'WHERE operation_key=?', (blocker['status'], 'Another mock run is active',
+                                        self.wall_now(), operation_key))
+                            db.execute('COMMIT')
+                            blocker = None if blocker is None else dict(blocker)
+                        except Exception:
+                            if db.in_transaction:
+                                db.execute('ROLLBACK')
+                            raise
+                        finally:
+                            db.close()
+                    if blocker:
+                        raise self._mock_run_state_error(blocker)
+                    if busy is None:
+                        break
+            time.sleep(0.2)
+        else:
+            self._update_mock_run(operation_key, 'not_started', 'prior_recovery',
+                                  error='Prior recovery did not settle before the wait expired')
+            raise RecoveryError(f'Mock run {run_id} did not reset either service because the prior recovery '
+                'did not settle within 45 seconds; retry with a new operation_key after it settles.', 409)
+
+        with self._mutation_lock:
+            try:
+                # Each state write commits before the next remote step; an interrupted reset stays visible.
+                step = 'provider_reset'
+                reset_body = {'scenario': scenario, 'variant': 0, 'run_id': run_id}
+                internal_request(self.key, self.provider_url, 'POST', '/internal/demo/reset', reset_body, timeout=30)
+                self._update_mock_run(operation_key, 'provider_reset_done', step)
+                step = 'lumen_reset'
+                self._update_mock_run(operation_key, 'lumen_reset_pending', step)
+                internal_request(self.key, self.lumen_url, 'POST', '/internal/demo/reset', reset_body, timeout=30)
+                self._update_mock_run(operation_key, 'lumen_reset_done', step)
+                step = 'manifest_readback'
+                self._update_mock_run(operation_key, 'manifest_read_pending', step)
+                provider_manifest = internal_request(self.key, self.provider_url, 'GET', '/internal/manifest')
+                lumen_manifest = internal_request(self.key, self.lumen_url, 'GET', '/internal/manifest')
+                scope = ('run_id', 'app', 'environment')
+                if (provider_manifest.get('run_id') != run_id
+                        or any(provider_manifest.get(key) != lumen_manifest.get(key) for key in scope)
+                        or any(provider_manifest.get(key) != current.get(key) for key in ('app','environment'))):
+                    raise RecoveryError('Provider and Lumen reset scopes do not agree')
+                manifest = dict(provider_manifest)
+                payment_verification = _manifest_payment_verification(manifest)
+                if payment_verification and not manifest.get('payment_verification'):
+                    manifest['payment_verification'] = payment_verification
+                step = 'manifest_update'
+                self._update_mock_run(operation_key, 'manifest_update_pending', step)
+                db = _conn(self.db_path)
+                try:
+                    db.execute('BEGIN IMMEDIATE')
+                    for key, value in manifest.items():
+                        _set_meta(db, key, value)
+                    _set_meta(db, 'logical_elapsed_seconds', 0)
+                    db.execute('COMMIT')
+                except Exception:
+                    if db.in_transaction:
+                        db.execute('ROLLBACK')
+                    raise
+                finally:
+                    db.close()
+                self._update_mock_run(operation_key, 'manifest_updated', step)
+                for name in faults:
+                    step = 'reapply_fault:'+name
+                    self._update_mock_run(operation_key, 'fault_rearm_pending', step)
+                    internal_request(self.key, self.lumen_url, 'POST', '/internal/demo/fault',
+                                     {'fault': name, 'active': True})
+                    self._update_mock_run(operation_key, 'fault_rearmed', step)
+                step = 'record_run_start'
+                self._record('demo_run_started', {'run_id': manifest['run_id'],
+                                                  'operation_key': operation_key})
+                step = 'customer_denial'
+                self._update_mock_run(operation_key, 'denial_pending', step)
+                status, gate = self._proxy_lumen_gate({'user_id': MOCK_RUN_TRIGGER_USER})
+                if status != 403 or not gate.get('event_id'):
+                    raise RecoveryError('The customer denial could not be confirmed')
+                result = {'status': 'accepted', 'run_id': manifest['run_id'],
+                          'trigger_user_id': MOCK_RUN_TRIGGER_USER, 'event_id': gate['event_id']}
+                self._update_mock_run(operation_key, 'accepted', 'complete', result=result)
+                return result
+            except Exception as exc:
+                self._update_mock_run(operation_key, 'unknown', step,
+                                      error=type(exc).__name__)
+                raise RecoveryError(f'Mock run {run_id} has an unknown outcome at {step}; reconcile the '
+                    'Provider and Lumen run, app and environment before using a new operation_key.', 503) from exc
 
     def _simulation(self, body):
         if self.demo and self.auto_repair and not self.live_config:
@@ -6518,8 +6801,10 @@ class RecoveryHandler(_legacy.Handler):
                 or any(part in ('', '.', '..') or part.startswith('.') for part in Path(decoded).parts[1:])):
             return self.respond({'error':'not found'}, 404)
         parts = Path(decoded.lstrip('/')).parts
+        public_json = decoded in ('/data/google_orders.json', '/data/projection_contract.json', '/data/sources.json')
         if (not parts or any(part.lower() in ('runtime','_evaluation','.env','.openai','.aws','.codex') for part in parts)
-                or Path(parts[-1]).suffix.lower() in ('.py','.pyc','.pyo','.sqlite','.sqlite3','.db','.key','.json')):
+                or Path(parts[-1]).suffix.lower() in ('.py','.pyc','.pyo','.sqlite','.sqlite3','.db','.key')
+                or (Path(parts[-1]).suffix.lower() == '.json' and not public_json)):
             return self.respond({'error':'not found'}, 404)
         root = STATIC.resolve()
         try:

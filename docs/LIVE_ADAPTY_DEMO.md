@@ -52,7 +52,7 @@ the server API; CLI commands are not run for every gate request. Keep the existi
 CLI session authenticated and the private key file available.
 
 1. Open the printed Reconcile URL and confirm the source registry contains 100 accounts.
-2. Choose **Start demo**. The new Lumen runtime awaits initial application;
+2. Choose **Run**. The new Lumen runtime awaits initial application;
    normal handler replay succeeds for 76 accounts and exercises 24 local failures.
    These are existing synthetic Adapty records, not new payments.
 3. Reconcile detects unapplied access proactively, without a customer gate request
@@ -61,7 +61,7 @@ CLI session authenticated and the private key file available.
    23 restored gates and one unresolved application failure remain visible.
    Each repair rechecks the current Adapty entitlement, resynchronizes Lumen and
    probes the same authorization decision used by the customer endpoint.
-5. Use **Run once** or **Run continuously** for later failures on healthy accounts.
+5. Use **Run** again for continuous later failures on healthy accounts.
    **Stop** prevents the next fault while monitoring and current recovery continue.
    Download activity for a chosen UTC `[from,to)` period as CSV or JSON; detailed
    observed steps and their owners are available in each incident's Activity.
@@ -71,7 +71,7 @@ requiring an operator click. It allows only existing local access to be resynced
 and verified. Unclear evidence remains unresolved. See
 [automatic recovery and measured overhead](AUTOMATIC_RECOVERY.md).
 
-**Advanced tools** retains the detailed console, the fixed 24-account injection,
+The explicit `/recovery-console.html` URL retains the detailed console, the fixed 24-account injection,
 the Lumen gate and HTML audit export. To replay the earlier manual workflow,
 start a fresh runtime with `--manual` and use `/recovery-console.html`.
 

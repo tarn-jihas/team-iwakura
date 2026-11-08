@@ -87,7 +87,8 @@ export function App() {
 
   async function refresh() {
     const current = state.current;
-    if (!current.alive || document.hidden || current.pending || controller.current) return;
+    if (!current.alive || document.hidden) return;
+    if (current.pending || controller.current) { schedule(); return; }
     try {
       const feed = await request<MonitorFeed>(monitorUrl(current.cursor, current.filterStatus));
       current.data = feed;

@@ -114,8 +114,14 @@ class RecoveryExportTests(unittest.TestCase):
         snapshot['lumen_accounts'][0].update(access_active=False,
             gate={'allowed':False,'reason':'subscription_expired'})
         title, description = recovery_monitor._cause(snapshot,{})
-        self.assertEqual(title,'Lumen access was not projected')
-        self.assertIn('no active local projection',description)
+        self.assertEqual(title,'Lumen had not applied subscription access')
+        self.assertIn('Lumen had not saved it',description)
+
+    def test_missing_activation_does_not_claim_adapty_access_was_already_active(self):
+        title, description = recovery_monitor._cause({'accounts':[
+            {'id':'u','status':'confirmed','payment_state':'paid','adapty_active':False}]}, {})
+        self.assertIn('not activated', title)
+        self.assertIn('matching Adapty access was missing', description)
 
 
 if __name__ == '__main__':

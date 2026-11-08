@@ -122,6 +122,16 @@ class RecoveryHTTPTests(unittest.TestCase):
             status, _, raw = self.exchange('engine', path)
             self.assertIn(status, (400, 403, 404), (path, raw[:100]))
 
+    def test_fixture_lab_can_load_only_its_public_json_assets(self):
+        for path in ('/data/google_orders.json', '/data/projection_contract.json', '/data/sources.json'):
+            status, headers, raw = self.exchange('engine', path)
+            self.assertEqual(status, 200, path)
+            self.assertIn('application/json', headers.get('Content-Type', ''))
+            json.loads(raw)
+        for path in ('/data/private.json', '/runtime/live-config.json', '/.openai/config.json'):
+            status, _, _ = self.exchange('engine', path)
+            self.assertEqual(status, 404, path)
+
     def test_home_and_retained_labs_use_local_assets(self):
         for path, script in (('/', b'monitor-app.js'), ('/recovery-console.html', b'recovery-app.js'),
                              ('/analytics.html', b'mock-app.js'),

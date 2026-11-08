@@ -44,6 +44,10 @@ button:focus-visible,a:focus-visible,summary:focus-visible { outline:3px solid v
 .fulfillment > span { margin-left:10px; color:var(--muted-foreground); font-size:12px; }
 .fulfillment .stages { margin:8px 0; }
 .fulfillment p,.trace-list p { margin:5px 0; font-size:12px; color:var(--muted-foreground); }
+.access-overview { display:flex; flex-wrap:wrap; gap:12px 28px; margin:16px 0; }
+.access-row > summary { display:flex; justify-content:space-between; gap:16px; font-size:13px; }
+.access-row > summary > span { margin:0; }
+.access-ok { color:#13785d; }
 .export-range { margin:18px 0; border:1px solid var(--border); border-radius:10px; background:white; }
 .export-range h2 { flex-basis:100%; font:600 17px var(--font-heading); margin:0; }
 .trace-list { padding-left:20px; }

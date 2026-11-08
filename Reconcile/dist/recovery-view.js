@@ -3,14 +3,14 @@ export const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, c => 
 export const LIVE_MODE = 'LIVE_ADAPTY_SEEDED';
 export function isLiveMode(report) { return report?.mode === LIVE_MODE; }
 export function provenanceLabel(report) { return isLiveMode(report) ? 'Real Adapty reads · synthetic purchase records' : 'Local synthetic evidence'; }
-export function paymentLabel(account, report) { return isLiveMode(report) ? 'Not independently verified' : statusLabel(account?.payment_state || 'Unknown'); }
+export function paymentLabel(account, report) { return isLiveMode(report) ? 'Not independently verified' : account?.payment_state === 'paid' ? 'Recorded synthetic purchase' : statusLabel(account?.payment_state || 'Not checked'); }
 
 const labels = {
   activation_missing: 'Activation missing', access_not_delivered: 'Access not delivered', healthy: 'Healthy',
-  inconclusive: 'Inconclusive', policy_denial: 'Policy denial', legitimate_denial: 'Legitimate denial',
+  inconclusive: 'Check source or identity', policy_denial: 'Blocked by app rule', legitimate_denial: 'Access denied as expected',
   restored: 'Restored', pending_verification: 'Pending verification', awaiting_client_action: 'Awaiting client action',
-  accepted: 'Accepted, verification pending', verified: 'Verified', failed: 'Failed',
-  unknown_outcome: 'Outcome unknown', blocked: 'Blocked',
+  accepted: 'Write accepted · access check pending', verified: 'Verified', failed: 'Action failed',
+  unknown_outcome: 'Result not confirmed · check evidence', blocked: 'Blocked by a precondition',
   confirmed: 'Confirmed discrepancy', potential: 'Potentially affected',
   outside_incident: 'Outside incident', not_scanned: 'Not evaluated', unclassified: 'Not evaluated',
   access_verified: 'Access verified', partial_recovery: 'Partial recovery', recovery_unresolved: 'Recovery unresolved',
@@ -26,7 +26,8 @@ export function targetLabel(action) {
 }
 export function statusTone(status) {
   if (['restored', 'healthy', 'verified'].includes(status)) return 'green';
-  if (['failed', 'blocked', 'unknown_outcome'].includes(status)) return 'red';
+  if (['failed', 'blocked'].includes(status)) return 'red';
+  if (status === 'unknown_outcome') return 'amber';
   if (['confirmed', 'potential', 'activation_missing', 'access_not_delivered', 'policy_denial', 'pending_verification', 'awaiting_client_action'].includes(status)) return 'amber';
   return 'blue';
 }
@@ -53,7 +54,7 @@ export function summaryView(report) {
   const s = report?.summary || {}, r = report?.recovery || {};
   const coverage = report?.coverage || {};
   return `<section class="recovery-summary" aria-label="Incident summary">
-    <article><span>Coverage</span><strong>${coverage.complete === true ? 'Complete' : coverage.complete === false ? 'Incomplete' : 'Unknown'}</strong><small>${escapeHtml((coverage.gaps || []).length)} evidence gaps</small></article>
+    <article><span>Source checks</span><strong>${coverage.complete === true ? 'Complete' : coverage.complete === false ? 'Some checks could not finish' : 'Not run yet'}</strong><small>${escapeHtml((coverage.gaps || []).length)} recorded data gaps · inspect account reasons below</small></article>
     <article><span>Evaluated</span><strong>${escapeHtml(s.evaluated ?? 0)} / ${escapeHtml(s.in_scope ?? 0)}</strong><small>${escapeHtml(s.excluded ?? 0)} excluded</small></article>
     <article><span>${isLiveMode(report) ? 'Entitlement verified' : 'Activation verified'}</span><strong>${escapeHtml((isLiveMode(report) ? r.entitlement_verified : r.activation_verified) ?? 0)}</strong><small>Evidence-backed checks</small></article>
     <article><span>Access verified</span><strong>${escapeHtml(r.access_verified ?? 0)}</strong><small>${escapeHtml(r.unresolved ?? 0)} unresolved</small></article>
@@ -62,7 +63,7 @@ export function summaryView(report) {
 
 export function accountRow(account, checked, busy = false, report = null) {
   const id = escapeHtml(account.id), status = account.status;
-  const payment = paymentLabel(account, report), adapty = account.adapty_active === true ? 'Active' : account.adapty_active === false ? 'Inactive' : 'Unknown';
-  const gate = account.gate?.allowed === true ? 'Allows access' : account.gate?.allowed === false ? 'Denies access' : 'Unknown';
+  const payment = paymentLabel(account, report), adapty = account.adapty_active === true ? 'Active' : account.adapty_active === false ? 'No active access' : 'Not checked';
+  const gate = account.gate?.allowed === true ? 'Allows access' : account.gate?.allowed === false ? 'Denies access' : 'No app decision recorded';
   return `<tr><td><input type="checkbox" data-account="${id}" aria-label="Select ${id}" ${checked ? 'checked' : ''} ${!account.eligible || busy ? 'disabled' : ''}></td><th scope="row"><button class="text-button mono" data-action="evidence" data-user="${id}">${id}</button><small>${escapeHtml(statusLabel(account.reason || 'No reason recorded'))}</small></th><td>${escapeHtml(payment)}</td><td>${escapeHtml(adapty)}</td><td>${escapeHtml(gate)}</td><td><span class="badge badge-${statusTone(status)}">${escapeHtml(statusLabel(status))}</span></td></tr>`;
 }

@@ -13,9 +13,15 @@ test('unknown statuses stay understandable without being labeled verified', () =
   assert.equal(statusTone('inconclusive'), 'blue');
 });
 
+test('policy blocks are app rules and unconfirmed outcomes remain pending', () => {
+  assert.equal(statusLabel('policy_denial'), 'Blocked by app rule');
+  assert.equal(statusLabel('unknown_outcome'), 'Result not confirmed · check evidence');
+  assert.equal(statusTone('unknown_outcome'), 'amber');
+});
+
 test('coverage and independent verification counts keep their backend values', () => {
   const html = summaryView({ coverage: { complete: false, gaps: ['client snapshot missing'] }, summary: { in_scope: 100, evaluated: 94, confirmed: 24, inconclusive: 6 }, recovery: { activation_verified: 24, access_verified: 23, unresolved: 1 } });
-  assert.match(html, /Incomplete/);
+  assert.match(html, /Some checks could not finish/);
   assert.match(html, /24/);
   assert.match(html, /23/);
   assert.match(html, /1 unresolved/);
@@ -24,7 +30,7 @@ test('coverage and independent verification counts keep their backend values', (
 test('only eligible rows can be selected for an exact plan', () => {
   const row = accountRow({ id: 'acct-1', status: 'inconclusive', eligible: false, reason: 'Insufficient evidence' }, false);
   assert.match(row, /disabled/);
-  assert.match(row, /Inconclusive/);
+  assert.match(row, /Check source or identity/);
   assert.match(row, /Insufficient evidence/);
 });
 
