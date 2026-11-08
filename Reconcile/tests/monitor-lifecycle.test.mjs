@@ -105,13 +105,13 @@ test('invalid UTC range shows an error without requesting an export', async t =>
   assert.match(browser.root.innerHTML,/From is earlier than To/);
 });
 
-test('monitor requests carry status and cursor pagination', async t => {
+test('monitor requests every status so the attention box and live feed are both complete', async t => {
   const urls = [];
   await browserHarness(t, async(url, options)=>{ urls.push(url); return response(feed('idle')); });
   const monitor = new URL(urls.find(url=>url.startsWith('/api/recovery/monitor')), 'http://local');
   assert.equal(monitor.searchParams.get('cursor'),'0');
-  assert.equal(monitor.searchParams.get('limit'),'50');
-  assert.equal(monitor.searchParams.get('status'),'needs_attention');
+  assert.equal(monitor.searchParams.get('limit'),'200');
+  assert.equal(monitor.searchParams.get('status'),null);
 });
 
 test('manual mode skips live fulfillment polling', async t => {
@@ -123,16 +123,18 @@ test('manual mode skips live fulfillment polling', async t => {
   assert.ok(!urls.some(url=>url.startsWith('/api/recovery/fulfillments')));
 });
 
-test('next page follows the server cursor', async t => {
-  const urls = [];
-  let monitorCount = 0;
+test('automatic mock mode Run starts one run through the simulation endpoint', async t => {
+  const calls = [];
   const browser = await browserHarness(t, async(url, options)=>{
-    urls.push(url);
-    if (url.startsWith('/api/recovery/monitor')) return response({...feed('idle'),pagination:{cursor:monitorCount++ ? 'next-token' : '0',limit:50,next_cursor:monitorCount === 1 ? 'next-token' : null,total:76}});
-    return response({items:[]});
+    calls.push({url,options});
+    if (url.startsWith('/api/recovery/monitor')) return response({...feed('idle'),mode:'FULL_MOCK',automation:{enabled:true}});
+    return response(options?.method === 'POST' ? {status:'accepted'} : {items:[]});
   });
-  await browser.click('page',{page:'1'});
-  assert.ok(urls.some(url=>url.includes('/api/recovery/monitor?cursor=next-token&limit=50&status=needs_attention')));
+  await browser.click('once');
+  const run = calls.find(call=>call.url === '/api/recovery/simulation');
+  assert.ok(run);
+  assert.equal(JSON.parse(run.options.body).action,'once');
+  assert.ok(!calls.some(call=>call.url === '/api/recovery/lumen/export'));
 });
 
 test('browser back-forward restoration resumes monitoring and actions', async t => {

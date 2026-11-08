@@ -133,17 +133,32 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--port', type=int, default=8875)
     parser.add_argument('--runtime', type=Path, default=HERE / 'runtime' / 'recovery')
+    parser.add_argument('--manual', action='store_true',
+                        help='Keep approval-gated manual recovery instead of automatic repair')
+    parser.add_argument('--mock', action='store_true',
+                        help='Use synthetic mock evidence even when a live Adapty config exists')
     args = parser.parse_args()
     if not 0 <= args.port <= 65535:
         parser.error('port must be between 0 and 65535')
+    live_config = HERE / 'runtime' / 'live-adapty' / 'live-config.json'
+    if not args.mock and not args.manual and live_config.is_file():
+        # Live is the default whenever the private, read-only Adapty config is present.
+        live_runtime = HERE / 'runtime' / 'live-adapty' / 'demo'
+        command = [sys.executable, str(HERE / 'recovery_live_demo.py'), '--config', str(live_config),
+                   '--runtime', str(live_runtime), '--port', str(args.port)]
+        if not live_runtime.exists():
+            command.append('--live-bootstrap-pending')
+        os.execv(sys.executable, command)
+    print(json.dumps({'notice': 'live Adapty config not found at ' + str(live_config.relative_to(HERE.parent))
+                      + '; starting the automatic synthetic mock'}), flush=True)
 
     def terminate(*_):
         raise KeyboardInterrupt
 
     signal.signal(signal.SIGTERM, terminate)
     try:
-        with Demo(args.runtime, args.port) as demo:
-            print(json.dumps({'mode': 'FULL_MOCK', 'url': demo.urls['engine'],
+        with Demo(args.runtime, args.port, auto_repair=not args.manual) as demo:
+            print(json.dumps({'mode': 'FULL_MOCK', 'automatic': not args.manual, 'url': demo.urls['engine'],
                               'services': demo.urls, 'runtime': str(demo.runtime)}), flush=True)
             while True:
                 for role, process in demo.processes.items():

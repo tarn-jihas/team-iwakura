@@ -54,10 +54,129 @@ def _cause(snapshot, incident):
             'The scan found current Adapty entitlements and denied Lumen gates. The observed evidence does not establish a more specific cause.')
 
 
+STEP_LABELS = {
+    'repair_catalog': ('Repair the Adapty catalog mapping', 'Adapty'),
+    'validate_purchase': ('Validate the paid purchase', 'Adapty'),
+    'resync_access': ('Resync Lumen access from Adapty', 'Lumen'),
+    'verify_gate': ('Verify the premium gate', 'Lumen'),
+}
+STEP_ORDER = ('repair_catalog', 'validate_purchase', 'resync_access', 'verify_gate')
+REASONS = {
+    'cache_stale': 'Lumen cache was still stale',
+    'subscription_inactive': 'Lumen still saw no active subscription',
+    'probe_unavailable': 'Lumen gate could not be reached',
+    'no_safe_targets': 'No account was safe to repair automatically',
+    'fresh_assessment_has_no_safe_retry': 'A fresh check found no account that is safe to retry',
+    'retry_left_unresolved_targets': 'The automatic retry finished, but some accounts are still denied',
+    'retry_already_used': 'The single automatic retry was already used',
+    'confirmed_targets_outside_safe_policy_scope': 'Some confirmed accounts are outside the automatic policy',
+    'execution_result_unavailable': 'The repair result could not be read back',
+    'job_failed': 'The repair job failed',
+    'automatic_policy_scope_changed': 'The automatic policy scope changed',
+}
+
+
+def _reason(value):
+    if not value:
+        return None
+    text = str(value)
+    return REASONS.get(text, text.replace('_', ' '))
+
+
+def _action_reason(action):
+    try:
+        result = json.loads(action['result']) if action and action.get('result') else {}
+    except (TypeError, json.JSONDecodeError):
+        result = {}
+    if not isinstance(result, dict):
+        return None
+    return _reason(result.get('reason') or result.get('error'))
+
+
+def _timeline(row, incident, snapshot, decisions, plans, actions_by_id, sdk_events):
+    """Readable, ordered recovery steps built only from durable engine records."""
+    steps = [{'step': 'Customer denied at the Lumen gate', 'owner': 'Lumen SDK',
+              'status': 'ok', 'at': row['created_at'],
+              'detail': f"{incident.get('trigger_user_id') or 'A customer'} was refused premium export; "
+                        'the signed SDK event opened this incident.'}]
+    if snapshot is None:
+        steps.append({'step': 'Scan all accounts', 'owner': 'Reconcile', 'status': 'running',
+                      'at': None, 'detail': 'Collecting payment, Adapty and Lumen evidence.'})
+        return steps, None
+    counts = {}
+    for account in snapshot.get('accounts', []):
+        counts[account.get('status')] = counts.get(account.get('status'), 0)+1
+    total = sum(counts.values())
+    steps.append({'step': 'Scan all accounts', 'owner': 'Reconcile', 'status': 'ok', 'at': None,
+                  'detail': f"{total} accounts checked · {counts.get('confirmed', 0)} confirmed broken · "
+                            f"{counts.get('inconclusive', 0)} inconclusive (never written) · "
+                            f"{total-counts.get('confirmed', 0)-counts.get('inconclusive', 0)} not affected"})
+    plans_by_id = {plan['id']: plan for plan in plans}
+    failure = None
+    for decision in decisions:
+        selected = json.loads(decision.get('selected_ids') or '[]')
+        try:
+            outcome = json.loads(decision['outcome_json']) if decision.get('outcome_json') else {}
+        except json.JSONDecodeError:
+            outcome = {}
+        label = 'Automatic decision' if not decision['attempt'] else 'Automatic retry decision'
+        steps.append({'step': label, 'owner': 'Reconcile policy',
+            'status': 'failed' if decision['status'] == 'unresolved' and not decision.get('plan_id') else
+                      'running' if decision['status'] in ('queued', 'plan_created') else 'ok',
+            'at': decision.get('created_at'),
+            'detail': f"Policy {decision['policy_id']} approved {len(selected)} "
+                      f"{'account' if len(selected) == 1 else 'accounts'} without a human."
+                      if selected else 'No account was safe to repair automatically.'})
+        plan = plans_by_id.get(decision.get('plan_id'))
+        if plan:
+            for kind in STEP_ORDER:
+                entries = [entry for entry in plan['plan'].get('entries', []) if entry.get('type') == kind]
+                if not entries:
+                    continue
+                label, owner = STEP_LABELS[kind]
+                done, failed, waiting = 0, [], 0
+                for entry in entries:
+                    action = actions_by_id.get(entry['id'])
+                    status = action['status'] if action else 'pending'
+                    if status == 'verified':
+                        done += 1
+                    elif status in ('failed', 'blocked', 'unknown_outcome'):
+                        failed.append({'account': entry.get('account_id') or 'catalog',
+                                       'reason': _action_reason(action) or status.replace('_', ' ')})
+                    else:
+                        waiting += 1
+                detail = f'{done} of {len(entries)} done'
+                if kind == 'resync_access' and sdk_events.get('access_projection_changed'):
+                    detail += f" · Lumen SDK reported {sdk_events['access_projection_changed']} projection updates"
+                if failed:
+                    detail += ' · failed: ' + ', '.join(f"{item['account']} ({item['reason']})" for item in failed[:5])
+                    if len(failed) > 5:
+                        detail += f' and {len(failed)-5} more'
+                steps.append({'step': label, 'owner': owner,
+                    'status': 'failed' if failed else 'running' if waiting else 'ok',
+                    'at': None, 'detail': detail, 'failed': failed})
+                if failed:
+                    failure = {'step': label, 'owner': owner, 'accounts': failed}
+        reason = _reason(outcome.get('reason'))
+        if decision['status'] == 'retry_scheduled':
+            steps.append({'step': 'Schedule one automatic retry', 'owner': 'Reconcile policy', 'status': 'ok',
+                          'at': decision.get('updated_at'),
+                          'detail': f"{outcome.get('unresolved', 0)} account(s) were not verified; retrying only those."})
+        elif decision['status'] == 'unresolved':
+            failure = {**(failure or {'step': label, 'owner': 'Reconcile policy', 'accounts': []}),
+                       'reason': reason or 'Automatic recovery could not verify access'}
+    gate_steps = [step for step in steps if step['step'] == STEP_LABELS['verify_gate'][0]]
+    if gate_steps and sdk_events.get('probe_allow'):
+        # Counted once for the whole incident, after any retry.
+        gate_steps[-1]['detail'] += (f" · collector received {sdk_events['probe_allow']} gate allows "
+                                     'for this incident in total')
+    return steps, failure
+
+
 def build(engine, cursor=None, limit=None, status=None):
     manifest = engine._manifest()
     live = bool(engine.live_config and manifest.get('scenario') == 'live_adapty')
-    if not live:
+    if not live and not engine.auto_repair:
         result = {'mode': 'FULL_MOCK', 'app': {'id': manifest.get('app'),
             'title': manifest.get('app_title'), 'environment': manifest.get('environment')},
             'automation': {'enabled': False, 'policy_id': None},
@@ -93,7 +212,8 @@ def build(engine, cursor=None, limit=None, status=None):
         page_limit = 50
 
     try:
-        source = engine._internal_request(engine.provider_url, 'GET', '/internal/live/status')
+        source = (engine._internal_request(engine.provider_url, 'GET', '/internal/live/status')
+                  if live else {})
     except Exception:
         source = {}
     try:
@@ -103,7 +223,8 @@ def build(engine, cursor=None, limit=None, status=None):
         telemetry = {'queued': 0, 'accepted': 0, 'dropped': 0, 'failed': 0,
                      'retries': 0, 'last_error': 'collector_unavailable'}
     try:
-        simulation = engine._simulation_summary()
+        simulation = (engine._simulation_summary() if live else
+                      {'status': 'idle', 'completed': 0, 'total': 0, 'error': None})
     except Exception:
         simulation = {'status': 'idle', 'completed': 0, 'total': 0, 'error': None}
 
@@ -162,6 +283,10 @@ def build(engine, cursor=None, limit=None, status=None):
             jobs = list(job_map.values())
         else:
             snapshots,plans,actions,decisions,jobs = {},[],[],[],[]
+            sdk_rows = []
+        sdk_rows = [] if live else [json.loads(row[0]) for row in db.execute(
+            "SELECT event_json FROM collector_events WHERE json_extract(event_json,'$.kind') "
+            "IN ('access_projection_changed','feature_access_decided')")]
         fulfillment_coverage = domain._meta(db,'fulfillment_coverage',{})
         fulfillment_counts = {row['status']:row['count'] for row in db.execute(
             'SELECT status,COUNT(*) AS count FROM fulfillment_expectations GROUP BY status')}
@@ -307,7 +432,27 @@ def build(engine, cursor=None, limit=None, status=None):
             summary = 'No repair was attempted because the incident scan failed.'
         else:
             summary = 'No safe account had a verified Lumen gate after recovery.' if affected else 'No safe repair target was confirmed.'
+        timeline, failure = None, None
+        if not live:
+            run_id = incident.get('run_id')
+            affected_set = set(affected)
+            sdk_events = {'access_projection_changed': sum(1 for event in sdk_rows
+                    if event.get('run_id') == run_id and event.get('kind') == 'access_projection_changed'
+                    and event.get('app_user_id') in affected_set),
+                'probe_allow': sum(1 for event in sdk_rows
+                    if event.get('run_id') == run_id and event.get('kind') == 'feature_access_decided'
+                    and (event.get('details') or {}).get('initiator') == 'reconcile_probe'
+                    and (event.get('details') or {}).get('decision') == 'allow')}
+            actions_by_plan = {action['id']: action for action in actions}
+            timeline, failure = _timeline(row, incident, snapshot, incident_decisions,
+                                          incident_plans, actions_by_plan, sdk_events)
+            if status == 'unresolved' and failure is None:
+                failure = {'step': 'Scan all accounts' if assessment_failed else 'Automatic recovery',
+                           'owner': 'Reconcile', 'accounts': [], 'reason': next_step}
+            if status != 'unresolved':
+                failure = None
         feed.append({'id': row['id'], 'title': title, 'description': description,
+            **({} if live else {'timeline': timeline, 'failure': failure}),
             'status': status, 'affected_accounts': len(affected),
             'repaired_accounts': len(repaired), 'detected_at': detected_at,
             'repair_started_at': repair_started_at, 'repaired_at': repaired_at,
@@ -324,12 +469,12 @@ def build(engine, cursor=None, limit=None, status=None):
         feed = all_feed
     current = source.get('cli_catalog') or {}
     total_affected = sum(item['affected_accounts'] for item in all_feed)
-    result = {'mode': 'LOCAL_ADAPTY_FIXTURE' if manifest.get('provenance') == 'synthetic_test_fixture' else 'LIVE_ADAPTY_SEEDED',
+    result = {'mode': 'FULL_MOCK' if not live else 'LOCAL_ADAPTY_FIXTURE' if manifest.get('provenance') == 'synthetic_test_fixture' else 'LIVE_ADAPTY_SEEDED',
         'app': {'id': manifest.get('app'), 'title': manifest.get('app_title'),
                 'environment': manifest.get('environment')},
         'automation': {'enabled': bool(engine.auto_repair),
                        'policy_id': 'local-fulfillment-resync-v2' if engine.auto_repair else None},
-        'connection': {'ready': source.get('account_count') == 100
+        'connection': {'ready': True} if not live else {'ready': source.get('account_count') == 100
                 and source.get('observed_count') == 100
                 and source.get('identity_match_count') == 100,
             'source_observed_at': source.get('source_observed_at'),
@@ -344,6 +489,7 @@ def build(engine, cursor=None, limit=None, status=None):
         'telemetry': {key: telemetry.get(key) for key in
             ('queued', 'accepted', 'dropped', 'failed', 'retries', 'last_error')},
         'simulation': simulation, 'incidents': feed,
+        **({} if live else {'demo': {'trigger_user_id': 'u00000'}}),
         'coverage': {**(fulfillment_coverage or {}),
             'source_requests_total': source.get('source_requests_total', 0),
             'last_source_request_at': source.get('last_source_request_at'),

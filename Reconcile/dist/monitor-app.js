@@ -15,7 +15,7 @@ function render() {
   const open = new Set([...root.querySelectorAll('details[open]')].map(detailsKey));
   const active = focusKey(document.activeElement) || actionFocus;
   if (rangeEdited) readRange(); else range = defaultRange();
-  const requestMessage = pending ? 'Request pending · waiting for the monitor response.' : accepted ? acceptedAction === 'stop' ? 'Stop accepted · waiting for the monitor to confirm.' : 'Request accepted · waiting for the monitor to confirm.' : '';
+  const requestMessage = pending && data?.mode === 'FULL_MOCK' ? 'Starting a run · a customer is about to be denied at the Lumen gate…' : pending ? 'Request pending · waiting for the monitor response.' : accepted ? acceptedAction === 'stop' ? 'Stop accepted · waiting for the monitor to confirm.' : 'Request accepted · waiting for the monitor to confirm.' : '';
   root.innerHTML = renderMonitor(data, {pollError, actionError, pending, requestMessage, status:filterStatus, fulfillments, traces, range, page});
   for (const el of root.querySelectorAll('details')) if (open.has(detailsKey(el))) el.open = true;
   if (active?.action) {
@@ -51,8 +51,7 @@ async function request(url, options = {}) {
 async function refresh() {
   if (!alive || document.hidden || pending || controller) return;
   try {
-    const status = filterStatus === 'unresolved' ? 'needs_attention' : filterStatus;
-    data = await request(`${path}?cursor=${encodeURIComponent(cursor)}&limit=50&status=${encodeURIComponent(status)}`); pollError = '';
+    data = await request(`${path}?cursor=0&limit=200`); pollError = '';
     if (data.pagination?.next_cursor == null && cursor > 0 && !(data.incidents || []).length) { cursor = 0; page = 0; cursorHistory = [0]; }
     if (['LIVE_ADAPTY_SEEDED','LOCAL_ADAPTY_FIXTURE'].includes(data.mode) && data.automation?.enabled === true) {
       const activity = await request('/api/recovery/fulfillments?cursor=0&limit=50'); fulfillments = activity.items || [];
@@ -114,7 +113,7 @@ root.addEventListener('click', async event => {
   render();
   try {
     await request('/api/recovery/simulation', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(action === 'stop' ? {action} : {action, operation_key:crypto.randomUUID()})});
-    accepted = true; acceptedAction = action;
+    accepted = data?.mode !== 'FULL_MOCK'; acceptedAction = action;
   } catch (e) { if (e.name !== 'AbortError' && alive) actionError = e.message || 'Simulation request failed.'; }
   pending = false;
   if (alive && !document.hidden) { await refresh(); render(); }

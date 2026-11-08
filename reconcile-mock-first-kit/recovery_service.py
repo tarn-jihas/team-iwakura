@@ -35,6 +35,8 @@ STATIC = HERE.parent / 'Reconcile' / 'dist'
 BODY_LIMIT = 1024 * 1024
 MAX_JOB_WORKERS = 8
 AUTOMATIC_POLICY_ID = 'local-fulfillment-resync-v2'
+# The synthetic walkthrough's first affected customer; RUN replays their denial.
+MOCK_RUN_TRIGGER_USER = 'u00000'
 SIMULATION_FAULTS = ('stale_cache', 'missed_projection', 'out_of_order')
 SIMULATION_GAP_SECONDS = 0.25
 SIMULATION_RECOVERY_TIMEOUT = 90
@@ -237,8 +239,8 @@ class RecoveryService:
         self.collector_url = self._collector(collector_url, required=role == 'lumen')
         self.demo = bool(demo)
         self.live_config = recovery_live.load_config(live_config) if live_config else None
-        if auto_repair and (role != 'engine' or not self.live_config):
-            raise ValueError('Automatic repair requires the live engine role')
+        if auto_repair and (role != 'engine' or not (self.live_config or self.demo)):
+            raise ValueError('Automatic repair requires the live or demo engine role')
         self.auto_repair = bool(auto_repair)
         self.live_bootstrap_pending = bool(live_bootstrap_pending)
         if self.live_bootstrap_pending and (not self.demo or not self.live_config):
@@ -1145,8 +1147,8 @@ class RecoveryService:
             db.close()
 
     def _export_recovery(self, from_value=None, to_value=None, format='json'):
-        if not self.live_config:
-            raise RecoveryError('Recovery export is available only in live Adapty mode', 404)
+        if not self.live_config and not (self.demo and self.auto_repair):
+            raise RecoveryError('Recovery export is available only in live or automatic demo mode', 404)
         if format not in ('csv','json'):
             raise RecoveryError('Export format must be csv or json')
         export_now = datetime.now(timezone.utc)
@@ -2353,7 +2355,7 @@ class RecoveryService:
             if snapshot['manifest'].get('scenario') == 'live_adapty':
                 self._record_fulfillment_snapshot_traces(db,incident_id,snapshot,observations)
             if (schedule_auto and self.auto_repair
-                    and snapshot['manifest'].get('scenario') == 'live_adapty'):
+                    and (snapshot['manifest'].get('scenario') == 'live_adapty') == bool(self.live_config)):
                 selected_ids = sorted(row['id'] for row in accounts
                     if row.get('status') == 'confirmed' and row.get('eligible'))
                 decision_id = 'auto-'+uuid4().hex
@@ -2585,8 +2587,8 @@ class RecoveryService:
             raise RecoveryError('Unknown automatic recovery decision', 404)
         if decision['status'] in ('completed', 'unresolved'):
             return {'decision_id': decision_id, 'status': decision['status']}
-        if (decision['policy_id'] != AUTOMATIC_POLICY_ID or not self.live_config
-                or self._manifest().get('scenario') != 'live_adapty'):
+        if (decision['policy_id'] != AUTOMATIC_POLICY_ID
+                or bool(self.live_config) != (self._manifest().get('scenario') == 'live_adapty')):
             self._finish_automatic_decision(decision_id, 'unresolved',
                                             {'reason': 'automatic_policy_scope_changed'})
             return {'decision_id': decision_id, 'status': 'unresolved'}
@@ -2598,8 +2600,13 @@ class RecoveryService:
         try:
             incident = self._get_incident(decision['incident_id'])
             snapshot = self._load_snapshot(decision['assessment_snapshot_id'])
-            plan = self._create_live_plan(selected_ids, incident, snapshot,
-                                          automatic_decision_id=decision_id)
+            if self.live_config:
+                plan = self._create_live_plan(selected_ids, incident, snapshot,
+                                              automatic_decision_id=decision_id)
+            elif decision.get('plan_id'):
+                plan = self._load_plan(decision['plan_id'])[1]
+            else:
+                plan = self._create_plan({'ids': selected_ids, 'incident_id': incident['id']})
             actor = 'policy:' + decision['policy_id']
             self._approve({'plan_id': plan['id'], 'plan_hash': plan['plan_hash'], 'actor': actor})
             queued = self._start_execution({'plan_id': plan['id'],
@@ -4470,11 +4477,19 @@ class RecoveryService:
                 if latest.get('source_fingerprint') != profile.get('source_fingerprint'):
                     raise RecoveryError('Delayed source update is no longer current', 409)
             result = domain.lumen_resync(self.db_path, body)
-            if self.live_config:
-                self._emit_projection_change(body['user_id'], result, body['operation_key'],
-                    occurred_at=result.get('processed_at'))
-                if fault_mode == 'timeout_after_commit':
-                    return result, True
+            evidence = result
+            if not self.live_config and result.get('accepted') and not result.get('duplicate'):
+                # Mock results keep their contract; the SDK event gets its own before/after view.
+                evidence = {**result, 'source_hash': expected.get('entitlement_hash'),
+                    'before': {'projection_revision': body['expected_revision']},
+                    'after': {'active': True, 'premium': True, 'expires_at': expected.get('expires_at'),
+                              'projection_revision': result['projection_revision'],
+                              'cache_revision': result['cache_revision'],
+                              'invalidated': bool(result.get('cache_skipped'))}}
+            self._emit_projection_change(body['user_id'], evidence, body['operation_key'],
+                occurred_at=result.get('processed_at'))
+            if self.live_config and fault_mode == 'timeout_after_commit':
+                return result, True
             return result
         if self.live_config and path in ('/internal/lumen/source-observed',
                 '/internal/lumen/handler/deliver'):
@@ -5524,7 +5539,74 @@ class RecoveryService:
             'source_calls':None if source_calls_before is None or source_calls_after is None
                 else source_calls_after-source_calls_before}
 
+    def _mock_run(self, body):
+        if (not isinstance(body, dict) or body.get('action') != 'once'
+                or set(body) != {'action', 'operation_key'}
+                or not isinstance(body.get('operation_key'), str)
+                or not body['operation_key'].strip() or len(body['operation_key']) > 128):
+            raise RecoveryError('Run fields do not match the contract')
+        # Let the previous recovery and its SDK deliveries finish before re-arming.
+        deadline = time.monotonic()+45
+        while time.monotonic() < deadline:
+            try:
+                pending = internal_request(self.key, self.lumen_url, 'GET',
+                                           '/internal/lumen/collector-coverage').get('queued', 0)
+            except Exception:
+                pending = 0
+            db = _conn(self.db_path)
+            try:
+                busy = db.execute("SELECT 1 FROM jobs WHERE status IN ('queued','running') LIMIT 1").fetchone()
+            finally:
+                db.close()
+            if not pending and not busy:
+                break
+            time.sleep(0.2)
+        else:
+            raise RecoveryError('The previous recovery is still finishing; try RUN again shortly', 409)
+        with self._mutation_lock:
+            db = _conn(self.db_path)
+            try:
+                if db.execute("SELECT 1 FROM jobs WHERE status IN ('queued','running') LIMIT 1").fetchone():
+                    raise RecoveryError('A recovery is still running; wait for it to finish', 409)
+            finally:
+                db.close()
+            current = self._manifest()
+            scenario = current.get('scenario') if current.get('scenario') in ('stripe','paddle','custom') else 'stripe'
+            run_id = 'activation-'+scenario+'-'+uuid4().hex[:12]
+            # Provider and Lumen get a fresh synthetic outage; incident history stays in the engine.
+            reset_body = {'scenario': scenario, 'variant': 0, 'run_id': run_id}
+            internal_request(self.key, self.provider_url, 'POST', '/internal/demo/reset', reset_body, timeout=30)
+            internal_request(self.key, self.lumen_url, 'POST', '/internal/demo/reset', reset_body, timeout=30)
+            manifest = internal_request(self.key, self.provider_url, 'GET', '/internal/manifest')
+            db = _conn(self.db_path)
+            try:
+                db.execute('BEGIN IMMEDIATE')
+                for key, value in manifest.items():
+                    _set_meta(db, key, value)
+                _set_meta(db, 'logical_elapsed_seconds', 0)
+                faults = [name for name in ('probe_outage', 'suppress_customer_telemetry')
+                          if domain._meta(db, 'demo_lumen_fault_'+name, False)]
+                db.execute('COMMIT')
+            except Exception:
+                if db.in_transaction:
+                    db.execute('ROLLBACK')
+                raise
+            finally:
+                db.close()
+            for name in faults:
+                internal_request(self.key, self.lumen_url, 'POST', '/internal/demo/fault',
+                                 {'fault': name, 'active': True})
+            self._record('demo_run_started', {'run_id': manifest['run_id'],
+                                              'operation_key': body['operation_key']})
+        status, gate = self._proxy_lumen_gate({'user_id': MOCK_RUN_TRIGGER_USER})
+        if status != 403 or not gate.get('event_id'):
+            raise RecoveryError('The customer denial could not be reproduced', 503)
+        return {'status': 'accepted', 'run_id': manifest['run_id'],
+                'trigger_user_id': MOCK_RUN_TRIGGER_USER, 'event_id': gate['event_id']}
+
     def _simulation(self, body):
+        if self.demo and self.auto_repair and not self.live_config:
+            return self._mock_run(body)
         if not self.demo or not self.live_config or not self.auto_repair:
             raise RecoveryError('Simulation requires automatic live demo mode', 404)
         if self.live_bootstrap_pending:
@@ -5774,7 +5856,8 @@ class RecoveryService:
             try:
                 db.execute('BEGIN IMMEDIATE')
                 for table in ('incidents','snapshots','jobs','plans','approvals','actions',
-                              'collector_events','collector_assessments','journal','meta'):
+                              'automatic_recovery','collector_events','collector_assessments',
+                              'journal','meta'):
                     db.execute('DELETE FROM '+table)
                 for key, value in manifest.items():
                     _set_meta(db, key, value)
@@ -5839,7 +5922,10 @@ class RecoveryService:
                     if set(body) != fields or not isinstance(body['user_id'], str) or not body['user_id']:
                         raise RecoveryError('Fault fields do not match the contract')
                 forwarded = {key: value for key, value in body.items() if key != 'action'}
-                return internal_request(self.key, self.lumen_url, 'POST', '/internal/demo/fault', forwarded)
+                result = internal_request(self.key, self.lumen_url, 'POST', '/internal/demo/fault', forwarded)
+                if 'active' in forwarded:
+                    self._set_scenario_meta('demo_lumen_fault_'+fault, forwarded['active'])
+                return result
             raise RecoveryError('Unsupported demo fault')
         raise RecoveryError('Unsupported demo action')
 
@@ -6132,7 +6218,8 @@ class RecoveryService:
                             if live_denial_only and should_scan else None)
                 matching = next((item for item in candidates if item['id'] == owned_id), None)
                 matching = matching or next((item for item in candidates
-                    if parse_time(item['window_start']) <= at < parse_time(item['window_end'])
+                    if item.get('run_id') == manifest.get('run_id')
+                    and parse_time(item['window_start']) <= at < parse_time(item['window_end'])
                     and (not live_denial_only or (
                         (item.get('cohort_signature') or {}).get('handler_version') == live_signature['handler_version']
                         and (item.get('cohort_signature') or {}).get('config_version') == live_signature['config_version']))
@@ -6481,7 +6568,13 @@ class RecoveryHandler(_legacy.Handler):
             return self._error(exc)
 
     def _engine_post(self, path, query, raw, body):
-        with self.service._mutation_lock:
+        service = self.service
+        if (path == '/api/recovery/simulation' and service.demo and service.auto_repair
+                and not service.live_config):
+            # Mock RUN waits for SDK deliveries, which are collector POSTs needing this lock;
+            # _mock_run takes the lock itself only while it re-arms the scenario.
+            return self._engine_post_locked(path, query, raw, body)
+        with service._mutation_lock:
             return self._engine_post_locked(path, query, raw, body)
 
     def _engine_post_locked(self, path, query, raw, body):

@@ -37,20 +37,20 @@ test('incident activity retains account context and actual processing receipts',
 test('a pending first replay has one obvious bootstrap action', () => {
   const data = {...feed([]),simulation:{status:'idle',bootstrap_required:true}};
   const html = renderMonitor(data);
-  assert.match(html, /data-action="bootstrap" >Start demo/);
+  assert.match(html, /data-action="bootstrap" >Run</);
   assert.doesNotMatch(html, /data-action="continuous"/);
   assert.doesNotMatch(html, /data-action="once"/);
 });
 
 test('renders empty and manual feeds honestly', () => {
   assert.match(renderMonitor(feed([])), /No incidents yet/);
-  assert.match(renderMonitor(feed([])), /Live Adapty · Seeded data/);
+  const header = renderMonitor(feed([])).split('</header>')[0];
+  assert.doesNotMatch(header, /Live Adapty · Seeded data|Local demo|last check|Source (ready|unavailable)/);
   assert.match(renderMonitor(null, {pollError:'<script>error</script>'}), /&lt;script&gt;error&lt;\/script&gt;/);
   const html = renderMonitor(feed([], false));
   assert.match(html, /Manual mode/);
   assert.doesNotMatch(html, /Run demo/);
-  assert.match(html, /Open advanced tools/);
-  assert.match(renderMonitor(feed([], true, false)), /Source unavailable/);
+  assert.doesNotMatch(html, /advanced tools/i);
   assert.match(renderMonitor(feed([], true, false)), /data-action="continuous" disabled/);
   const integration = renderMonitor(feed([]));
   assert.match(integration, /100 active · 100 total accounts/);
@@ -103,7 +103,7 @@ test('CSV quotes text, preserves timestamps and neutralizes formulas', () => {
 test('pending controls are disabled and polling and action errors remain separate', () => {
   const pending = renderMonitor(feed([item()]), {pending:true,requestMessage:'Request pending'});
   assert.match(pending, /data-action="continuous" disabled/);
-  assert.match(pending, /data-action="once" disabled/);
+  assert.doesNotMatch(pending, /Run once/);
   assert.match(pending, /Request pending/);
   const errors = renderMonitor(feed([]), {pollError:'Feed unavailable',actionError:'Simulation rejected'});
   assert.match(errors, /Feed unavailable/);
@@ -113,7 +113,7 @@ test('pending controls are disabled and polling and action errors remain separat
 test('a running simulation can be stopped when the source becomes unavailable', () => {
   const data = {...feed([], true, false), simulation:{status:'running',completed:1,total:3}};
   const html = renderMonitor(data);
-  assert.match(html, /data-action="stop" >Stop simulation/);
+  assert.match(html, /data-action="stop" >Stop</);
   assert.doesNotMatch(html, /data-action="stop" disabled/);
   assert.match(renderMonitor(data, {pending:true}), /data-action="stop" disabled/);
   const continuous = renderMonitor({...data, simulation:{status:'running',continuous:true,completed:3,total:0}});
@@ -121,4 +121,44 @@ test('a running simulation can be stopped when the source becomes unavailable', 
   assert.doesNotMatch(continuous, /3 of 0/);
   assert.doesNotMatch(renderMonitor({...data,simulation:{status:'stopped',waiting_reason:'no_candidates'}}), /no_candidates/);
   assert.match(renderMonitor({...data,simulation:{status:'stopped',waiting_reason:'engine_storage_limit',error:'engine_storage_limit'}}), /engine storage limit/);
+});
+
+test('unresolved incidents are marked in their own box and stay out of the live feed', () => {
+  const html = renderMonitor(feed([item({id:'fixed-1',status:'repaired'}), item({id:'stuck-1',status:'unresolved',repaired_accounts:0,next_step:'Check the gate'})]));
+  const attention = html.slice(html.indexOf('class="feed attention"'), html.indexOf('class="feed live-feed"'));
+  const live = html.slice(html.indexOf('class="feed live-feed"'));
+  assert.match(attention, /Needs attention/);
+  assert.match(attention, /data-incident="stuck-1"/);
+  assert.doesNotMatch(attention, /data-incident="fixed-1"/);
+  assert.match(live, /data-incident="fixed-1"/);
+  assert.doesNotMatch(live, /data-incident="stuck-1"/);
+  assert.doesNotMatch(renderMonitor(feed([item({status:'repaired'})])), /class="feed attention"/);
+});
+
+test('automatic mock mode has one Run button, no advanced tools, and is disabled while repairing', () => {
+  const html = renderMonitor({...feed([]), mode:'FULL_MOCK', telemetry:{queued:0}});
+  assert.match(html, /data-action="once" >Run<\/button>/);
+  assert.doesNotMatch(html, /advanced tools|recovery-console/i);
+  assert.doesNotMatch(html, /data-action="continuous"/);
+  assert.match(renderMonitor({...feed([item({status:'repairing'})]), mode:'FULL_MOCK'}), /data-action="once" disabled>Run/);
+});
+
+test('mock incidents show a readable step trace and where automatic repair stopped', () => {
+  const timeline = [
+    {step:'Scan all accounts', owner:'Reconcile', status:'ok', detail:'100 accounts checked'},
+    {step:'Verify the premium gate', owner:'Lumen', status:'failed', detail:'0 of 24 done · failed: u00000 (<b>probe</b>)'}];
+  const failure = {step:'Verify the premium gate', owner:'Lumen', reason:'Gate unreachable', accounts:[{account:'u00000', reason:'probe unavailable'}]};
+  const html = renderMonitor({...feed([item({status:'unresolved', timeline, failure})]), mode:'FULL_MOCK'});
+  assert.match(html, /Stopped at: Verify the premium gate/);
+  assert.match(html, /u00000 \(probe unavailable\)/);
+  assert.match(html, /class="step-failed"/);
+  assert.match(html, /What happened, step by step/);
+  assert.doesNotMatch(html, /<b>probe<\/b>/);
+  assert.doesNotMatch(html, /data-action="trace"/);
+});
+
+test('Run waits while SDK events are still being delivered', () => {
+  const html = renderMonitor({...feed([item()]), mode:'FULL_MOCK', telemetry:{queued:6}});
+  assert.match(html, /data-action="once" disabled>Run/);
+  assert.match(html, /Delivering 6 SDK events to the collector/);
 });
