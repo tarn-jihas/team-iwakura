@@ -6,8 +6,11 @@ from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 import http.client
 import json
+import math
 from pathlib import Path
 import stat
+import sqlite3
+import threading
 import time
 from uuid import uuid4
 
@@ -23,13 +26,24 @@ PROVENANCE = 'official_synthetic_seed'
 PAYMENT_VERIFICATION = 'not_independently_verified'
 MAX_PROFILE_BYTES = 1024 * 1024
 MAX_RETRIES = 2
+SOURCE_FULL_PASS_INTERVAL = 60
 
 
 class LiveSourceError(RuntimeError):
-    def __init__(self, code, status=503):
+    def __init__(self, code, status=503, retry_after=None):
         self.code = code
         self.status = status
+        self.retry_after = retry_after
         super().__init__('Adapty source unavailable (' + code + ')')
+
+
+_REFRESH_LOCKS, _REFRESH_LOCKS_GUARD = {}, threading.Lock()
+
+
+def _refresh_lock(path):
+    key = str(Path(path).resolve())
+    with _REFRESH_LOCKS_GUARD:
+        return _REFRESH_LOCKS.setdefault(key, threading.Lock())
 
 
 def wall_now():
@@ -94,42 +108,111 @@ def _load_secret(path):
 
 def _retry_delay(value):
     try:
-        return min(2.0, max(0.0, float(value)))
+        delay = float(value)
+        return max(0.0, delay) if math.isfinite(delay) else 1.0
     except (TypeError, ValueError):
         try:
-            return min(2.0, max(0.0, (parsedate_to_datetime(value)-datetime.now(timezone.utc)).total_seconds()))
-        except (TypeError, ValueError, OverflowError):
+            return max(0.0, (parsedate_to_datetime(value)-datetime.now(timezone.utc)).total_seconds())
+        except (TypeError, ValueError, OverflowError, IndexError):
             return 1.0
 
 
 class AdaptyReader:
     """Fixed-host, HTTPS-only GET adapter. Tests inject a per-customer transport."""
 
-    def __init__(self, config, transport=None):
+    def __init__(self, config, transport=None, provider_path=None):
         self.config = config
         self._api_key = _load_secret(config['secret_key_file'])
         self.transport = transport or self._https_get
+        self.provider_path = provider_path
+        self._read_lock = threading.Lock()
+        self._uses_http = transport is None
+        self._pass_context = threading.local()
+
+    def _source_cooldown(self):
+        if self.provider_path is None:
+            return 0
+        db = domain.connect(self.provider_path)
+        try:
+            not_before = domain._meta(db, 'adapty_not_before_epoch', 0)
+        finally:
+            db.close()
+        return max(0, float(not_before or 0)-time.time())
+
+    def _save_source_cooldown(self, delay):
+        if self.provider_path is None or delay <= 0:
+            return
+        db = domain.connect(self.provider_path)
+        try:
+            db.execute('BEGIN IMMEDIATE')
+            current = domain._meta(db, 'adapty_not_before_epoch', 0)
+            domain._set_meta(db, 'adapty_not_before_epoch',
+                             max(float(current or 0), time.time()+delay))
+            db.execute('COMMIT')
+        except Exception:
+            if db.in_transaction:
+                db.execute('ROLLBACK')
+            raise
+        finally:
+            db.close()
+
+    def _record_source_request(self):
+        if self.provider_path is None:
+            return
+        db = None
+        try:
+            db = domain.connect(self.provider_path)
+            db.execute('BEGIN IMMEDIATE')
+            total = domain._meta(db, 'adapty_source_requests_total', 0) + 1
+            domain._set_meta(db, 'adapty_source_requests_total', total)
+            domain._set_meta(db, 'adapty_source_request_last_at', wall_now())
+            pass_id = getattr(self._pass_context, 'pass_id', None)
+            if pass_id:
+                db.execute('UPDATE source_passes SET source_calls=source_calls+1 WHERE pass_id=?',
+                           (pass_id,))
+            db.execute('COMMIT')
+        except sqlite3.Error:
+            if db is not None and db.in_transaction:
+                db.execute('ROLLBACK')
+        finally:
+            if db is not None:
+                db.close()
+
+    def _get_response(self, customer_user_id, headers):
+        with self._read_lock:
+            remaining = self._source_cooldown()
+            if remaining:
+                raise LiveSourceError('rate_limited', 503, remaining)
+            connection = http.client.HTTPSConnection(API_HOST, timeout=5)
+            try:
+                connection.request('GET', API_PATH, headers=headers)
+                self._record_source_request()
+                response = connection.getresponse()
+                delay = (_retry_delay(response.getheader('Retry-After'))
+                         if response.status == 429 else None)
+                if delay:
+                    self._save_source_cooldown(delay)
+                return connection, response, delay
+            except Exception:
+                connection.close()
+                raise
 
     def _https_get(self, customer_user_id):
         headers = {'Authorization': 'Api-Key ' + self._api_key,
                    'adapty-customer-user-id': customer_user_id,
                    'Accept': 'application/json'}
         for attempt in range(MAX_RETRIES + 1):
-            connection = http.client.HTTPSConnection(API_HOST, timeout=5)
+            connection = None
             try:
-                connection.request('GET', API_PATH, headers=headers)
-                response = connection.getresponse()
+                connection, response, delay = self._get_response(customer_user_id, headers)
+                if response.status == 429:
+                    if delay >= 2.0 or attempt >= MAX_RETRIES:
+                        raise LiveSourceError('rate_limited', 503, delay)
+                    time.sleep(delay)
+                    continue
                 body = response.read(MAX_PROFILE_BYTES + 1)
                 if len(body) > MAX_PROFILE_BYTES:
                     raise LiveSourceError('response_too_large')
-                if response.status == 429:
-                    if attempt >= MAX_RETRIES:
-                        raise LiveSourceError('rate_limited', 503)
-                    delay = _retry_delay(response.getheader('Retry-After'))
-                    if delay >= 2.0:
-                        raise LiveSourceError('rate_limited', 503)
-                    time.sleep(delay)
-                    continue
                 if response.status != 200:
                     raise LiveSourceError('http_' + str(response.status), 503)
                 return body
@@ -138,12 +221,25 @@ class AdaptyReader:
             except (OSError, http.client.HTTPException, TimeoutError) as exc:
                 raise LiveSourceError('transport_error', 503) from exc
             finally:
-                connection.close()
+                if connection is not None:
+                    connection.close()
         raise LiveSourceError('rate_limited', 503)
 
     def read(self, customer_user_id):
         try:
-            payload = self.transport(customer_user_id)
+            if self._uses_http:
+                payload = self.transport(customer_user_id)
+            else:
+                with self._read_lock:
+                    remaining = self._source_cooldown()
+                    if remaining:
+                        raise LiveSourceError('rate_limited', 503, remaining)
+                    try:
+                        payload = self.transport(customer_user_id)
+                    except LiveSourceError as exc:
+                        if exc.retry_after:
+                            self._save_source_cooldown(exc.retry_after)
+                        raise
             raw = payload if isinstance(payload, dict) else json.loads(payload)
             if isinstance(raw, dict) and isinstance(raw.get('data'), dict):
                 raw = raw['data']
@@ -189,7 +285,9 @@ def normalize_profile(raw, config, customer_user_id, now=None):
     evaluated = []
     for level in candidates:
         transaction_id, product_id = level.get('store_transaction_id'), level.get('store_product_id')
-        if not _text(transaction_id) or not _text(product_id) or type(level.get('is_in_grace_period')) is not bool:
+        store = level.get('store')
+        if (not _text(product_id) or store not in ('app_store', 'play_store')
+                or type(level.get('is_in_grace_period')) is not bool):
             continue
         start_value = level.get('starts_at') or level.get('purchased_at')
         try:
@@ -199,15 +297,16 @@ def normalize_profile(raw, config, customer_user_id, now=None):
         if expires_at <= starts_at:
             continue
         matching = [item for item in subscriptions if isinstance(item, dict)
-                    and item.get('store_transaction_id') == transaction_id
-                    and item.get('store_product_id') == product_id]
-        subscription = next((item for item in matching
-                             if item.get('environment') == SOURCE_ENVIRONMENT), None)
-        if (subscription is None or level.get('store') not in ('app_store', 'play_store')
-                or type(subscription.get('is_in_grace_period')) is not bool):
+                    and item.get('store_product_id') == product_id
+                    and item.get('store') == store
+                    and (item.get('store_transaction_id') == transaction_id
+                         if _text(transaction_id) else True)]
+        matching = [item for item in matching if item.get('environment') == SOURCE_ENVIRONMENT]
+        subscription = (matching[0] if _text(transaction_id) and matching else
+                        matching[0] if not _text(transaction_id) and len(matching) == 1 else None)
+        if (subscription is None or type(subscription.get('is_in_grace_period')) is not bool):
             continue
-        if (level.get('store') != subscription.get('store')
-                or subscription.get('billing_issue_detected_at') is not None
+        if (subscription.get('billing_issue_detected_at') is not None
                 or any(subscription.get(key) is not None for key in
                        ('refunded_at', 'revoked_at', 'chargeback_at'))
                 or any(level.get(key) is not None for key in
@@ -248,11 +347,19 @@ def normalize_profile(raw, config, customer_user_id, now=None):
     active = [item for item in evaluated if item[0]]
     eligible, expires_at, reason, level, subscription, starts_at = max(
         active or evaluated, key=lambda item: item[1])
+    transaction_id = level.get('store_transaction_id')
+    original_transaction_id = (level.get('store_original_transaction_id')
+        or level.get('original_transaction_id')
+        or subscription.get('store_original_transaction_id')
+        or subscription.get('original_transaction_id'))
     entitlement = {
         'user_id': customer_user_id, 'provider_customer_id': customer_user_id,
         'app_id': APP_ID, 'profile_id': raw['profile_id'],
         'access_level_id': 'premium', 'product_id': level['store_product_id'],
-        'transaction_id': level['store_transaction_id'],
+        'transaction_id': transaction_id if _text(transaction_id) else None,
+        'original_transaction_id': original_transaction_id if _text(original_transaction_id) else None,
+        'store': level['store'],
+        'source_environment': subscription['environment'],
         'starts_at': starts_at.isoformat(timespec='seconds').replace('+00:00', 'Z'),
         'purchased_at': level.get('purchased_at'),
         'expires_at': expires_at.isoformat(timespec='seconds').replace('+00:00', 'Z'),
@@ -276,6 +383,7 @@ def _schema(db):
         'CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY,value TEXT NOT NULL)',
         'CREATE TABLE IF NOT EXISTS live_profiles(user_id TEXT PRIMARY KEY,profile_json TEXT NOT NULL,error_code TEXT)',
         'CREATE TABLE IF NOT EXISTS live_catalog(id INTEGER PRIMARY KEY CHECK(id=1),catalog_json TEXT NOT NULL)',
+        'CREATE TABLE IF NOT EXISTS source_passes(pass_id TEXT PRIMARY KEY,requested INTEGER NOT NULL,observed INTEGER NOT NULL DEFAULT 0,source_calls INTEGER NOT NULL DEFAULT 0,started_at TEXT NOT NULL,completed_at TEXT,waiting_reason TEXT)',
     ):
         db.execute(statement)
 
@@ -283,7 +391,21 @@ def _schema(db):
 def init_provider(provider_path, adapty_path, config, reader):
     from adapty_seed_setup import read_cli_catalog
 
-    catalog = read_cli_catalog(APP_ID)
+    provider = domain.connect(provider_path)
+    try:
+        not_before = domain._meta(provider, 'adapty_not_before_epoch', 0)
+        cached = provider.execute('SELECT catalog_json FROM live_catalog WHERE id=1').fetchone()
+    except Exception:
+        not_before, cached = 0, None
+    finally:
+        provider.close()
+    if (isinstance(not_before, (int, float)) and not isinstance(not_before, bool)
+            and time.time() < not_before):
+        if cached is None:
+            raise LiveSourceError('rate_limited', 503, not_before-time.time())
+        catalog = json.loads(cached['catalog_json'])
+    else:
+        catalog = read_cli_catalog(APP_ID)
     products = catalog.get('products')
     if (catalog.get('app_id') != APP_ID or type(catalog.get('product_count')) is not int
             or not isinstance(products, list) or len(products) != catalog['product_count']
@@ -377,32 +499,106 @@ def init_provider(provider_path, adapty_path, config, reader):
     refresh_profiles(provider_path, config, reader, config['customer_user_ids'])
 
 
-def refresh_profiles(provider_path, config, reader, user_ids):
+def refresh_profiles(provider_path, config, reader, user_ids, *, include_profiles=False):
+    with _refresh_lock(provider_path):
+        return _refresh_profiles_locked(provider_path, config, reader, user_ids,
+                                        include_profiles=include_profiles)
+
+
+def _refresh_profiles_locked(provider_path, config, reader, user_ids, *, include_profiles=False):
     if (not isinstance(user_ids, list) or not user_ids or len(user_ids) > 100
             or len(set(user_ids)) != len(user_ids)
             or any(user_id not in config['customer_user_ids'] for user_id in user_ids)):
         raise ValueError('Live refresh scope is invalid')
-    results = {}
+    full_scope = (len(user_ids) == len(config['customer_user_ids'])
+        and set(user_ids) == set(config['customer_user_ids']))
+    now = time.time()
+    db = domain.connect(provider_path)
+    try:
+        db.execute('CREATE TABLE IF NOT EXISTS source_passes(pass_id TEXT PRIMARY KEY,requested INTEGER NOT NULL,observed INTEGER NOT NULL DEFAULT 0,source_calls INTEGER NOT NULL DEFAULT 0,started_at TEXT NOT NULL,completed_at TEXT,waiting_reason TEXT)')
+        not_before = domain._meta(db, 'adapty_not_before_epoch', 0)
+        last_full_pass = domain._meta(db, 'adapty_full_pass_started_epoch', 0)
+        last_full_pass = (float(last_full_pass) if isinstance(last_full_pass,(int,float))
+                          and not isinstance(last_full_pass,bool) else 0)
+        next_full_pass = last_full_pass+SOURCE_FULL_PASS_INTERVAL
+        if not (isinstance(not_before,(int,float)) and not isinstance(not_before,bool)
+                and now < not_before) and full_scope and now < next_full_pass:
+            return {'requested':len(user_ids),'observed':0,'active':0,
+                'waiting_reason':'source_poll_interval','source_calls':0,
+                'not_before':datetime.fromtimestamp(next_full_pass,timezone.utc).isoformat(
+                    timespec='seconds').replace('+00:00','Z')}
+        if isinstance(not_before,(int,float)) and not isinstance(not_before,bool) and now < not_before:
+            return {'requested':len(user_ids),'observed':0,'active':0,
+                'waiting_reason':'source_cooldown','source_calls':0,
+                'not_before':datetime.fromtimestamp(not_before,timezone.utc).isoformat(
+                    timespec='seconds').replace('+00:00','Z')}
+    finally:
+        db.close()
+    pass_id, started_at = uuid4().hex, wall_now()
+    db = domain.connect(provider_path)
+    try:
+        db.execute('INSERT INTO source_passes VALUES(?,?,?,?,?,?,?)',
+                   (pass_id, len(user_ids), 0, 0, started_at, None, None))
+        if full_scope:
+            domain._set_meta(db, 'adapty_last_source_pass', pass_id)
+            domain._set_meta(db, 'adapty_full_pass_started_epoch', now)
+        else:
+            domain._set_meta(db, 'adapty_last_profile_pass', pass_id)
+        last_full_pass = domain._meta(db, 'adapty_last_source_pass')
+        if last_full_pass:
+            db.execute('DELETE FROM source_passes WHERE pass_id NOT IN '
+                       '(SELECT pass_id FROM source_passes ORDER BY started_at DESC LIMIT 100) '
+                       'AND pass_id!=?', (last_full_pass,))
+        else:
+            db.execute('DELETE FROM source_passes WHERE pass_id NOT IN '
+                       '(SELECT pass_id FROM source_passes ORDER BY started_at DESC LIMIT 100)')
+    finally:
+        db.close()
+    results, cooldown_delays = {}, []
+    def read_user(user_id):
+        has_pass_context = hasattr(reader, '_pass_context')
+        if has_pass_context:
+            reader._pass_context.pass_id = pass_id
+        try:
+            return reader.read(user_id)
+        finally:
+            if has_pass_context:
+                try:
+                    del reader._pass_context.pass_id
+                except AttributeError:
+                    pass
     with ThreadPoolExecutor(max_workers=8) as executor:
-        futures = {user_id: executor.submit(reader.read, user_id) for user_id in user_ids}
+        futures = {user_id: executor.submit(read_user, user_id) for user_id in user_ids}
         for user_id, future in futures.items():
             try:
                 profile = future.result()
                 results[user_id] = (profile, None)
             except LiveSourceError as exc:
+                if exc.retry_after is not None:
+                    cooldown_delays.append(exc.retry_after)
                 results[user_id] = ({'user_id': user_id, 'provider_customer_id': user_id,
                     'status': 'unknown', 'reason': exc.code, 'identity_match': False,
                     'source_fingerprint': None, 'source_revision': None,
                     'observed_at': None, 'entitlement': None, 'provenance': PROVENANCE,
                     'payment_verification': PAYMENT_VERIFICATION}, exc.code)
+    retry_after = max(cooldown_delays, default=0)
+    observed = sum(not error for _, error in results.values())
+    waiting_reason = ('source_cooldown' if retry_after > 0 else
+                      'source_unavailable' if observed != len(user_ids) else None)
     db = domain.connect(provider_path)
     try:
         db.execute('BEGIN IMMEDIATE')
         for user_id, (profile, error) in results.items():
+            if error == 'rate_limited':
+                continue
             db.execute('INSERT INTO live_profiles VALUES(?,?,?) ON CONFLICT(user_id) DO UPDATE SET profile_json=excluded.profile_json,error_code=excluded.error_code',
                        (user_id, domain.canonical(profile), error))
             db.execute('UPDATE provider_accounts SET identity_status=? WHERE user_id=?',
                        ('mapped' if profile.get('identity_match') else 'unknown', user_id))
+        pass_row = db.execute('SELECT source_calls FROM source_passes WHERE pass_id=?',
+                              (pass_id,)).fetchone()
+        db.execute('UPDATE source_passes SET observed=?,completed_at=?,waiting_reason=? WHERE pass_id=?',
+                   (observed, wall_now(), waiting_reason, pass_id))
         db.execute('COMMIT')
     except Exception:
         if db.in_transaction:
@@ -410,9 +606,15 @@ def refresh_profiles(provider_path, config, reader, user_ids):
         raise
     finally:
         db.close()
-    return {'requested': len(user_ids), 'observed': sum(not error for _, error in results.values()),
-            'active': sum(profile.get('status') == 'active' for profile, _ in results.values()),
-            'source_observed_at': wall_now()}
+    return {'requested': len(user_ids), 'observed': observed,
+            'active': sum(profile.get('status') == 'active' for profile, error in results.values()
+                          if not error),
+            'source_observed_at': wall_now() if observed == len(user_ids) else None,
+            'source_calls': 0 if pass_row is None else pass_row['source_calls'],
+            'source_pass_id': pass_id,
+            **({'items': [results[user_id][0] for user_id in user_ids]}
+               if include_profiles else {}),
+            **({'waiting_reason': waiting_reason} if waiting_reason else {})}
 
 
 def profile(provider_path, user_id):
@@ -458,9 +660,24 @@ def status(provider_path):
             continue
     observed = [item['observed_at'] for item in items if item.get('observed_at')]
     mapped = sum(bool(item.get('identity_match')) for item in items)
+    db = domain.connect(provider_path)
+    try:
+        last_id = domain._meta(db, 'adapty_last_source_pass')
+        last_row = (None if not last_id else db.execute(
+            'SELECT requested,observed,source_calls,started_at,completed_at,waiting_reason '
+            'FROM source_passes WHERE pass_id=?', (last_id,)).fetchone())
+        source_calls = domain._meta(db, 'adapty_source_requests_total', 0)
+        last_request_at = domain._meta(db, 'adapty_source_request_last_at')
+        not_before = domain._meta(db, 'adapty_not_before_epoch', 0)
+    finally:
+        db.close()
     return {'account_count': result['total'], 'active_count': len(active),
             'observed_count': len(observed), 'identity_match_count': mapped,
             'source_observed_at': max(observed) if observed else None,
+            'source_requests_total': source_calls,
+            'last_source_request_at': last_request_at,
+            'source_cooldown_seconds': max(0, int(float(not_before or 0)-time.time())),
+            'last_source_pass': None if last_row is None else dict(last_row),
             'provider_evidence_count': 0,
             'provenance': PROVENANCE,
             'payment_verification': PAYMENT_VERIFICATION,

@@ -23,9 +23,13 @@ def main():
     parser.add_argument('--port', type=int, default=8876)
     parser.add_argument('--manual', action='store_true',
                         help='Keep the existing approval-gated manual recovery flow')
+    parser.add_argument('--live-bootstrap-pending', action='store_true',
+                        help='Start a fresh Lumen runtime awaiting the 100-account handler replay')
     args = parser.parse_args()
     if not 0 <= args.port <= 65535:
         parser.error('port must be between 0 and 65535')
+    if args.manual and args.live_bootstrap_pending:
+        parser.error('pending bootstrap requires automatic recovery')
     load_config(args.config)
 
     def terminate(*_):
@@ -34,7 +38,8 @@ def main():
     signal.signal(signal.SIGTERM, terminate)
     try:
         with Demo(args.runtime, args.port, live_config=args.config,
-                  auto_repair=not args.manual) as demo:
+                  auto_repair=not args.manual,
+                  live_bootstrap_pending=args.live_bootstrap_pending) as demo:
             with urlopen(demo.urls['engine'] + '/api/recovery/live/status', timeout=15) as response:
                 status = json.load(response)
             print(json.dumps({'mode': 'LIVE_ADAPTY_SEEDED', 'scenario': 'live_adapty',

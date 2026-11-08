@@ -254,7 +254,7 @@ def init_lumen(path, scenario='stripe', variant=0, reset=False, run_id=None):
         db.close()
 
 
-def init_live_lumen(path, live_manifest, profiles):
+def init_live_lumen(path, live_manifest, profiles, *, pending=False):
     if (live_manifest.get('customer_count') != 100 or len(profiles) != 100
             or any(not item.get('observed_at') or not item.get('identity_match')
                    for item in profiles)):
@@ -269,6 +269,10 @@ def init_live_lumen(path, live_manifest, profiles):
         'CREATE TABLE IF NOT EXISTS actions(operation_key TEXT PRIMARY KEY,request_hash TEXT NOT NULL,result TEXT NOT NULL,created_at TEXT NOT NULL)',
         'CREATE TABLE IF NOT EXISTS mobile_events(event_id TEXT PRIMARY KEY,event_json TEXT NOT NULL,received_at TEXT NOT NULL)',
         'CREATE TABLE IF NOT EXISTS live_fault_tags(user_id TEXT PRIMARY KEY,handler_version TEXT NOT NULL,config_version TEXT NOT NULL,occurred_at TEXT NOT NULL)',
+        'CREATE TABLE IF NOT EXISTS live_source_events(user_id TEXT NOT NULL,source_fingerprint TEXT NOT NULL,event_id TEXT NOT NULL,occurred_at TEXT NOT NULL,details_json TEXT NOT NULL,created_at TEXT NOT NULL,PRIMARY KEY(user_id,source_fingerprint))',
+        'CREATE TABLE IF NOT EXISTS live_handler_faults(user_id TEXT PRIMARY KEY,fault_mode TEXT NOT NULL,remaining_attempts INTEGER NOT NULL,permanent INTEGER NOT NULL,created_at TEXT NOT NULL)',
+        'CREATE TABLE IF NOT EXISTS live_handler_results(processing_id TEXT PRIMARY KEY,user_id TEXT NOT NULL,transaction_id TEXT,source_fingerprint TEXT NOT NULL,outcome TEXT NOT NULL,result_json TEXT NOT NULL,recorded_at TEXT NOT NULL)',
+        'CREATE INDEX IF NOT EXISTS live_handler_results_source ON live_handler_results(user_id,transaction_id,source_fingerprint,recorded_at DESC,processing_id DESC)',
     ])
     try:
         if _meta(db, 'initialized', False):
@@ -281,12 +285,14 @@ def init_live_lumen(path, live_manifest, profiles):
             now = iso(datetime.now(timezone.utc))
             for name, value in live_manifest.items():
                 _set_meta(db, name, value)
+            _set_meta(db, 'live_bootstrap_pending', bool(pending))
+            _set_meta(db, 'live_handler_paused', bool(pending))
             _set_meta(db, 'scenario_now', now)
             _set_meta(db, 'logical_elapsed_seconds', 0)
             for profile in profiles:
                 user_id = profile['user_id']
                 entitlement = profile.get('entitlement')
-                active = bool(profile.get('status') == 'active' and entitlement)
+                active = bool(not pending and profile.get('status') == 'active' and entitlement)
                 customer_id = profile.get('provider_customer_id', user_id)
                 # The configured app/customer registry is the local identity map; source validation is separate.
                 identity = 'mapped' if customer_id == user_id else 'unknown'
@@ -307,6 +313,160 @@ def init_live_lumen(path, live_manifest, profiles):
             if db.in_transaction:
                 db.execute('ROLLBACK')
             raise
+    finally:
+        db.close()
+
+
+def lumen_simulation_configure(path, faults, *, paused=None, prepare_projection_loss=None):
+    """Set demo-only handler behavior before a source event is replayed."""
+    allowed_modes = {'handler_precommit', 'db_precommit', 'cache_refresh_skipped',
+                     'timeout_after_commit', 'delayed_older_update', 'permanent_handler'}
+    prepare_projection_loss = [] if prepare_projection_loss is None else prepare_projection_loss
+    if (not isinstance(faults, list) or len(faults) > 100
+            or any(not isinstance(item, dict) or set(item) != {'user_id','fault_mode',
+                'remaining_attempts','permanent'} or not isinstance(item['user_id'],str)
+                or not item['user_id'] or item['fault_mode'] not in allowed_modes
+                or type(item['remaining_attempts']) is not int or item['remaining_attempts'] < 1
+                or type(item['permanent']) is not bool for item in faults)
+            or len({item['user_id'] for item in faults}) != len(faults)
+            or not isinstance(prepare_projection_loss, list)
+            or len(prepare_projection_loss) > 100
+            or any(not isinstance(user_id, str) or not user_id
+                   for user_id in prepare_projection_loss)
+            or len(set(prepare_projection_loss)) != len(prepare_projection_loss)):
+        raise ValueError('Invalid live simulation handler faults')
+    db = connect(path)
+    try:
+        db.execute('BEGIN IMMEDIATE')
+        if _meta(db, 'scenario') != 'live_adapty' or not _meta(db, 'live_bootstrap_pending', False):
+            raise ValueError('Live simulation controls require a pending demo bootstrap')
+        now = iso(datetime.now(timezone.utc))
+        for user_id in prepare_projection_loss:
+            access = db.execute('SELECT * FROM access WHERE user_id=?', (user_id,)).fetchone()
+            if access is None or not _gate(db, user_id)['allowed']:
+                raise ValueError('Live simulation projection loss requires a healthy account')
+            next_revision = access['projection_revision'] + 1
+            db.execute('UPDATE access SET active=0,projection_revision=?,cache_revision=?, '
+                'cache_active=0,cache_invalidated=0,updated_at=? WHERE user_id=?',
+                (next_revision,next_revision,now,user_id))
+        db.executemany('INSERT INTO live_handler_faults VALUES(?,?,?,?,?) '
+            'ON CONFLICT(user_id) DO UPDATE SET fault_mode=excluded.fault_mode,'
+            'remaining_attempts=excluded.remaining_attempts,permanent=excluded.permanent,'
+            'created_at=excluded.created_at',
+            ((item['user_id'],item['fault_mode'],item['remaining_attempts'],
+              int(item['permanent']),iso(datetime.now(timezone.utc))) for item in faults))
+        if paused is not None:
+            _set_meta(db, 'live_handler_paused', bool(paused))
+        db.execute('COMMIT')
+    except Exception:
+        if db.in_transaction:
+            db.execute('ROLLBACK')
+        raise
+    finally:
+        db.close()
+    return {'configured_faults': len(faults),
+            'prepared_projection_losses':len(prepare_projection_loss),
+            'paused': bool(paused)}
+
+
+def lumen_simulation_take_fault(path, user_id):
+    db = connect(path)
+    try:
+        db.execute('BEGIN IMMEDIATE')
+        if not _meta(db, 'live_bootstrap_pending', False):
+            db.execute('COMMIT')
+            return None
+        row = db.execute('SELECT * FROM live_handler_faults WHERE user_id=?', (user_id,)).fetchone()
+        if row is None:
+            db.execute('COMMIT')
+            return None
+        fault = dict(row)
+        if not fault['permanent']:
+            remaining = fault['remaining_attempts']-1
+            if remaining <= 0:
+                db.execute('DELETE FROM live_handler_faults WHERE user_id=?', (user_id,))
+            else:
+                db.execute('UPDATE live_handler_faults SET remaining_attempts=? WHERE user_id=?',
+                           (remaining,user_id))
+        db.execute('COMMIT')
+        return fault['fault_mode']
+    except Exception:
+        if db.in_transaction:
+            db.execute('ROLLBACK')
+        raise
+    finally:
+        db.close()
+
+
+def lumen_handler_result(path, processing_id):
+    db = connect(path)
+    try:
+        row = db.execute('SELECT * FROM live_handler_results WHERE processing_id=?',
+                         (processing_id,)).fetchone()
+        return None if row is None else {**dict(row), 'result': json.loads(row['result_json'])}
+    finally:
+        db.close()
+
+
+def lumen_handler_results(path, cursor=None, limit=500):
+    try:
+        offset = int(cursor or 0)
+    except (TypeError, ValueError) as exc:
+        raise ValueError('Invalid handler result cursor') from exc
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 1000 or offset < 0:
+        raise ValueError('Invalid handler result page')
+    latest = (' FROM live_handler_results h WHERE NOT EXISTS ('
+        'SELECT 1 FROM live_handler_results newer WHERE newer.user_id=h.user_id '
+        'AND newer.transaction_id IS h.transaction_id '
+        'AND newer.source_fingerprint=h.source_fingerprint '
+        'AND (newer.recorded_at>h.recorded_at OR '
+        '(newer.recorded_at=h.recorded_at AND newer.processing_id>h.processing_id)))')
+    db = connect(path)
+    try:
+        total = db.execute('SELECT COUNT(*)'+latest).fetchone()[0]
+        rows = db.execute('SELECT h.*'+latest+
+            ' ORDER BY h.user_id,h.transaction_id,h.source_fingerprint LIMIT ? OFFSET ?',
+            (limit,offset)).fetchall()
+        items = []
+        for row in rows:
+            item = dict(row)
+            item['result'] = json.loads(item.pop('result_json'))
+            items.append(item)
+        next_cursor = str(offset+len(items)) if offset+len(items) < total else None
+        return {'items':items,'cursor':str(offset),'limit':limit,
+            'next_cursor':next_cursor,'total':total,
+            'pagination':{'cursor':str(offset),'limit':limit,
+                'next_cursor':next_cursor,'total':total}}
+    finally:
+        db.close()
+
+
+def lumen_find_processing_result(path, processing_id):
+    """Read back a projection transaction if the handler receipt write was interrupted."""
+    db = connect(path)
+    try:
+        for row in db.execute('SELECT result FROM actions ORDER BY created_at DESC'):
+            try:
+                result = json.loads(row['result'])
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if result.get('processing_id') == processing_id:
+                return result
+        return None
+    finally:
+        db.close()
+
+
+def lumen_save_handler_result(path, processing_id, user_id, transaction_id,
+                              source_fingerprint, outcome, result, recorded_at=None):
+    if (not all(isinstance(value,str) and value for value in
+            (processing_id,user_id,source_fingerprint,outcome)) or not isinstance(result,dict)):
+        raise ValueError('Invalid handler processing result')
+    at = recorded_at or iso(datetime.now(timezone.utc))
+    db = connect(path)
+    try:
+        db.execute('INSERT OR IGNORE INTO live_handler_results VALUES(?,?,?,?,?,?,?)',
+            (processing_id,user_id,transaction_id,source_fingerprint,outcome,canonical(result),at))
     finally:
         db.close()
 
@@ -634,20 +794,74 @@ def lumen_access(path, user_id):
         db.close()
 
 
+def lumen_source_event(path, user_id, source_fingerprint, event_id, occurred_at, details):
+    if (not isinstance(user_id,str) or not user_id or not isinstance(source_fingerprint,str)
+            or len(source_fingerprint)!=64 or not isinstance(event_id,str) or not event_id
+            or not isinstance(details,dict)):
+        raise ValueError('Invalid source event binding')
+    occurred_at = iso(_time(occurred_at,'source observation time'))
+    db = connect(path)
+    try:
+        db.execute('CREATE TABLE IF NOT EXISTS live_source_events(user_id TEXT NOT NULL,source_fingerprint TEXT NOT NULL,event_id TEXT NOT NULL,occurred_at TEXT NOT NULL,details_json TEXT NOT NULL,created_at TEXT NOT NULL,PRIMARY KEY(user_id,source_fingerprint))')
+        db.execute('BEGIN IMMEDIATE')
+        row = db.execute('SELECT event_id,occurred_at,details_json FROM live_source_events '
+            'WHERE user_id=? AND source_fingerprint=?',(user_id,source_fingerprint)).fetchone()
+        if row:
+            result = {'event_id':row['event_id'],'occurred_at':row['occurred_at'],
+                      'details':json.loads(row['details_json'])}
+        else:
+            now = iso(datetime.now(timezone.utc))
+            db.execute('INSERT INTO live_source_events VALUES(?,?,?,?,?,?)',
+                (user_id,source_fingerprint,event_id,occurred_at,canonical(details),now))
+            result = {'event_id':event_id,'occurred_at':occurred_at,'details':details}
+        db.execute('COMMIT')
+        return result
+    except Exception:
+        if db.in_transaction:
+            db.execute('ROLLBACK')
+        raise
+    finally:
+        db.close()
+
+
 def lumen_resync(path, body):
-    required = {'user_id', 'expected_revision', 'entitlement', 'operation_key'}
-    if not isinstance(body, dict) or set(body) != required:
+    legacy_fields = {'user_id', 'expected_revision', 'entitlement', 'operation_key'}
+    v2_fields = {'schema_version', 'user_id', 'expected_provider_customer_id',
+        'expected_identity_revision', 'expected_policy_revision',
+        'expected_projection_revision', 'entitlement', 'operation_key',
+        'processing_id', 'trace_id'}
+    if not isinstance(body, dict):
+        raise ValueError('Resync fields do not match the contract')
+    version = body.get('schema_version', 1)
+    if (version == 1 and set(body) != legacy_fields
+            or version == 2 and (type(version) is not int or set(body) != v2_fields)
+            or version not in (1, 2)):
         raise ValueError('Resync fields do not match the contract')
     if not isinstance(body['user_id'], str) or not body['user_id'] or len(body['user_id']) > 256:
         raise ValueError('Invalid user_id')
-    if isinstance(body['expected_revision'], bool) or not isinstance(body['expected_revision'], int) or body['expected_revision'] < 1:
+    expected_revision = (body['expected_projection_revision'] if version == 2
+                         else body['expected_revision'])
+    if isinstance(expected_revision, bool) or not isinstance(expected_revision, int) or expected_revision < 1:
         raise ValueError('Invalid expected_revision')
+    if version == 2:
+        for name in ('expected_identity_revision', 'expected_policy_revision'):
+            if isinstance(body[name], bool) or not isinstance(body[name], int) or body[name] < 1:
+                raise ValueError('Invalid '+name)
+        for name in ('expected_provider_customer_id', 'processing_id', 'trace_id'):
+            if not isinstance(body[name], str) or not body[name] or len(body[name]) > 256:
+                raise ValueError('Invalid '+name)
     entitlement = body['entitlement']
     required_entitlement = {'product_id', 'expires_at', 'entitlement_hash', 'transaction_id'}
-    if not isinstance(entitlement, dict) or set(entitlement) not in (required_entitlement,
-            required_entitlement | {'source_fingerprint'}):
+    optional_entitlement = {'source_fingerprint', 'original_transaction_id', 'store', 'source_environment'}
+    allowed_entitlement = required_entitlement | optional_entitlement
+    if (not isinstance(entitlement, dict)
+            or (version == 1 and set(entitlement) not in (required_entitlement,
+                required_entitlement | {'source_fingerprint'}))
+            or (version == 2 and (not required_entitlement <= set(entitlement)
+                or set(entitlement)-allowed_entitlement))):
         raise ValueError('Invalid entitlement')
-    if any(not isinstance(entitlement[key], str) or not entitlement[key] for key in entitlement):
+    if any(not isinstance(entitlement[key], str) or not entitlement[key]
+           for key in required_entitlement | (set(entitlement) & optional_entitlement)):
         raise ValueError('Invalid entitlement')
     if 'source_fingerprint' in entitlement and (len(entitlement['source_fingerprint']) != 64
             or any(char not in '0123456789abcdef' for char in entitlement['source_fingerprint'])):
@@ -658,9 +872,13 @@ def lumen_resync(path, body):
     db = connect(path)
     db.execute('BEGIN IMMEDIATE')
     try:
-        if _meta(db, 'scenario') == 'live_adapty' and 'source_fingerprint' not in entitlement:
-            raise ValueError('Live resync requires a source fingerprint')
-        if _meta(db, 'scenario') != 'live_adapty' and 'source_fingerprint' in entitlement:
+        live = _meta(db, 'scenario') == 'live_adapty'
+        if live and (version != 2 or 'source_fingerprint' not in entitlement):
+            raise ValueError('Live resync requires contract version 2 and a source fingerprint')
+        if live and (not entitlement.get('transaction_id') or not entitlement.get('store')
+                or not entitlement.get('source_environment')):
+            raise ValueError('Live resync requires a source transaction link')
+        if not live and (version != 1 or 'source_fingerprint' in entitlement):
             raise ValueError('Source fingerprint is supported only for live resync')
         now = iso(_app_now(db))
         previous = db.execute('SELECT request_hash,result FROM actions WHERE operation_key=?', (body['operation_key'],)).fetchone()
@@ -677,7 +895,12 @@ def lumen_resync(path, body):
             raise ValueError('Lumen identity is not mapped')
         if not policy['enabled']:
             raise ValueError('Lumen policy blocks this feature')
-        if row['projection_revision'] != body['expected_revision']:
+        if version == 2 and (account['provider_customer_id'] != body['expected_provider_customer_id']
+                or mapping['provider_customer_id'] != body['expected_provider_customer_id']
+                or mapping['revision'] != body['expected_identity_revision']
+                or policy['revision'] != body['expected_policy_revision']):
+            raise ValueError('Lumen identity or policy revision changed')
+        if row['projection_revision'] != expected_revision:
             raise ValueError('Lumen access revision changed')
         expiry = _time(entitlement['expires_at'], 'expires_at')
         if expiry <= _app_now(db):
@@ -698,7 +921,8 @@ def lumen_resync(path, body):
         result = {'accepted': True, 'user_id': body['user_id'],
                   'projection_revision': next_revision,
                   'cache_revision': row['cache_revision'] if skip_cache else next_revision,
-                  'cache_skipped': skip_cache, 'operation_key': body['operation_key']}
+                  'cache_skipped': skip_cache, 'operation_key': body['operation_key'],
+                  'processed_at': now}
         if _meta(db, 'scenario') == 'live_adapty':
             source_hash = entitlement['source_fingerprint']
             result.update(before=before, after={'active': True, 'premium': True,
@@ -710,6 +934,22 @@ def lumen_resync(path, body):
                 projection_version=_meta(db, 'live_handler_version', 'lumen-handler-v2'),
                 config_version=_meta(db, 'live_config_version', 'premium-export-v2'))
             db.execute('DELETE FROM live_fault_tags WHERE user_id=?', (body['user_id'],))
+        if version == 2:
+            result.update(schema_version=2, transaction_id=entitlement['transaction_id'],
+                original_transaction_id=entitlement.get('original_transaction_id'),
+                processing_id=body['processing_id'], trace_id=body['trace_id'],
+                revisions={'identity': mapping['revision'], 'policy': policy['revision'],
+                    'projection': next_revision,
+                    'cache': row['cache_revision'] if skip_cache else next_revision},
+                steps=[
+                    {'name': 'receive', 'status': 'completed', 'owner': 'lumen', 'result': 'accepted'},
+                    {'name': 'handler', 'status': 'completed', 'owner': 'lumen', 'result': 'verified'},
+                    {'name': 'projection_commit', 'status': 'completed', 'owner': 'lumen',
+                     'result': 'committed', 'revision': next_revision},
+                    {'name': 'cache_refresh', 'status': 'skipped' if skip_cache else 'completed',
+                     'owner': 'lumen', 'result': 'skipped' if skip_cache else 'committed',
+                     'revision': row['cache_revision'] if skip_cache else next_revision},
+                ])
         db.execute('INSERT INTO actions VALUES(?,?,?,?)',
                    (body['operation_key'], digest(body), canonical(result), now))
         db.execute('COMMIT')
@@ -825,15 +1065,24 @@ def lumen_action(path, operation_key):
 
 def mobile_event(path, body):
     required = {'event_id', 'user_id', 'kind', 'occurred_at', 'details'}
-    if not isinstance(body, dict) or set(body) != required:
+    version = body.get('schema_version', 1) if isinstance(body, dict) else None
+    if (not isinstance(body, dict)
+            or (version == 1 and set(body) != required)
+            or (version == 2 and (type(version) is not int or set(body) != required | {'schema_version'}))
+            or version not in (1, 2)):
         raise ValueError('Mobile event fields do not match the contract')
     if any(not isinstance(body[name], str) or not body[name].strip() or len(body[name]) > 256
            for name in ('event_id', 'user_id', 'kind', 'occurred_at')):
         raise ValueError('Invalid mobile event metadata')
     if body['kind'] not in ('purchase_succeeded', 'subscription_profile_updated', 'access_denied'):
         raise ValueError('Unsupported mobile event kind')
-    if not isinstance(body['details'], dict) or set(body['details']) - {'transaction_id','product_id','price_id','feature','reason_code'}:
+    detail_keys = {'transaction_id','original_transaction_id','product_id','price_id','feature',
+        'reason_code','processing_id','trace_id','steps','revisions','stack'}
+    if not isinstance(body['details'], dict) or set(body['details']) - detail_keys:
         raise ValueError('Only allowlisted mobile metadata is accepted')
+    if version == 2 and (not body['details'].get('transaction_id')
+            or not {'processing_id','trace_id','steps','revisions'} <= set(body['details'])):
+        raise ValueError('Version-2 mobile events require a processing receipt')
     _time(body['occurred_at'], 'occurred_at')
     db = connect(path)
     try:

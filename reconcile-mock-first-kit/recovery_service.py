@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import argparse
+import csv
 from datetime import datetime, timedelta, timezone
 import hashlib
 import hmac
+import io
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import ipaddress
 import json
@@ -32,10 +34,13 @@ HERE = Path(__file__).resolve().parent
 STATIC = HERE.parent / 'Reconcile' / 'dist'
 BODY_LIMIT = 1024 * 1024
 MAX_JOB_WORKERS = 8
-AUTOMATIC_POLICY_ID = 'local-entitlement-resync-v1'
+AUTOMATIC_POLICY_ID = 'local-fulfillment-resync-v2'
 SIMULATION_FAULTS = ('stale_cache', 'missed_projection', 'out_of_order')
 SIMULATION_GAP_SECONDS = 0.25
 SIMULATION_RECOVERY_TIMEOUT = 90
+LIVE_SOURCE_POLL_SECONDS = 60
+LIVE_LOCAL_AUDIT_SECONDS = 30
+LIVE_NEW_RIGHT_GRACE_SECONDS = 30
 
 
 class RecoveryError(ValueError):
@@ -48,6 +53,11 @@ class InternalHTTPError(OSError):
     def __init__(self, status, payload=None, retry_after=None):
         super().__init__('Internal simulator HTTP '+str(status))
         self.status, self.payload, self.retry_after = status, payload, retry_after
+
+
+class SourceReadUnavailable(RecoveryError):
+    def __init__(self):
+        super().__init__('Fresh Adapty profile read failed', 503)
 
 
 class RateLimitError(RecoveryError):
@@ -216,7 +226,7 @@ def _one(query, key, default=None):
 class RecoveryService:
     def __init__(self, role, port, db_path, key_file, *, provider_url=None,
                  lumen_url=None, collector_url=None, demo=False, live_config=None,
-                 auto_repair=False):
+                 auto_repair=False, live_bootstrap_pending=False):
         self.role = role
         self.port = port
         self.db_path = Path(db_path).resolve()
@@ -230,12 +240,18 @@ class RecoveryService:
         if auto_repair and (role != 'engine' or not self.live_config):
             raise ValueError('Automatic repair requires the live engine role')
         self.auto_repair = bool(auto_repair)
+        self.live_bootstrap_pending = bool(live_bootstrap_pending)
+        if self.live_bootstrap_pending and (not self.demo or not self.live_config):
+            raise ValueError('Pending live bootstrap is demo-only')
         self.live_reader = None
         self.adapty_db = self.db_path.with_name(self.db_path.stem + '-adapty.sqlite3')
         self.outbox_db = self.db_path.with_name(self.db_path.stem + '-outbox.sqlite3')
         self._jobs_lock = threading.Lock()
         self._mutation_lock = threading.RLock()
         self._simulation_inject_lock = threading.Lock()
+        self._fulfillment_wake = threading.Event()
+        self._fulfillment_stop = threading.Event()
+        self._fulfillment_thread = None
         self._active_jobs = set()
         self.server = None
         self.sdk = None
@@ -243,6 +259,7 @@ class RecoveryService:
         if role == 'provider':
             if self.live_config:
                 self.live_reader = recovery_live.AdaptyReader(self.live_config)
+                self.live_reader.provider_path = self.db_path
                 recovery_live.init_provider(self.db_path, self.adapty_db,
                                             self.live_config, self.live_reader)
             else:
@@ -253,7 +270,8 @@ class RecoveryService:
                                                   'GET', '/internal/manifest')
                 bootstrap = internal_request(self.key, self.provider_url,
                     'GET', '/internal/adapty/profiles?limit=100', timeout=60)
-                domain.init_live_lumen(self.db_path, live_manifest, bootstrap.get('items', []))
+                domain.init_live_lumen(self.db_path, live_manifest, bootstrap.get('items', []),
+                                       pending=self.live_bootstrap_pending)
             else:
                 domain.init_lumen(self.db_path)
             self._init_sdk()
@@ -262,7 +280,15 @@ class RecoveryService:
         else:
             self._init_engine()
             self._init_legacy()
+            if self.live_config:
+                try:
+                    self._live_fulfillment_audit(refresh_source=False)
+                except Exception:
+                    self._set_fulfillment_coverage({'complete':False,
+                        'waiting_reason':'startup_audit_unavailable','updated_at':self.wall_now()})
             self._resume_jobs()
+            if self.live_config and self.auto_repair:
+                self._start_fulfillment_watcher()
 
     @staticmethod
     def _base(value, name, required=False):
@@ -305,39 +331,279 @@ class RecoveryService:
                         'identity_scope_mismatch': 'identity_mismatch',
                         'premium_entitlement_absent': 'none',
                         'premium_source_binding_uncertain': 'source_unavailable'}
+        emitted = {}
         for profile in profiles:
             if not profile.get('source_fingerprint') or not profile.get('observed_at'):
                 continue
             entitlement = profile.get('entitlement') or {}
             reason = reason_codes.get(profile.get('reason'), 'source_unavailable')
             try:
-                self.sdk.emit('source_entitlement_observed', profile['user_id'],
-                    profile['observed_at'], {
+                details = {
                         'source_hash': profile['source_fingerprint'],
                         'starts_at': entitlement.get('starts_at'),
                         'expires_at': entitlement.get('expires_at'),
                         'adapter_version': 'adapty-profile-read-v1',
-                        'outcome': 'observed', 'reason_code': reason})
+                        'outcome': 'observed', 'reason_code': reason}
+                for key, value in (
+                        ('transaction_id', entitlement.get('transaction_id')),
+                        ('original_transaction_id', entitlement.get('original_transaction_id')),
+                        ('source_environment', entitlement.get('source_environment')),
+                        ('store', entitlement.get('store')),
+                        ('access_level', entitlement.get('access_level_id')),
+                        ('customer_id', profile.get('provider_customer_id')),
+                        ('source_version', entitlement.get('source_revision'))):
+                    if isinstance(value, str) and value:
+                        details[key] = value
+                event_id = 'source:'+digest({'customer': profile['user_id'],
+                    'source_hash': profile['source_fingerprint']})
+                source_event = domain.lumen_source_event(self.db_path, profile['user_id'],
+                    profile['source_fingerprint'], event_id, profile['observed_at'], details)
+                emitted[profile['user_id']] = source_event
+                self.sdk.emit('source_entitlement_observed', profile['user_id'],
+                    source_event['occurred_at'], source_event['details'],
+                    event_id=source_event['event_id'], correlation_id=source_event['event_id'],
+                    source_event_id=source_event['event_id'])
             except Exception:
                 pass
+        return emitted
 
-    def _notify_live_source_observations(self, profiles):
-        if not profiles:
-            return
+    def _emit_handler_completed(self, profile, processing_id, source_event, result):
+        if not self.sdk or not profile.get('source_fingerprint'):
+            return False
+        entitlement = profile.get('entitlement') or {}
+        transaction_id = entitlement.get('transaction_id')
+        if not transaction_id:
+            return False
+        outcome = result.get('outcome', 'failed')
+        outcome = 'unknown' if outcome == 'diagnostic_only' else outcome
+        failed = outcome != 'completed'
+        details = {'event_type': 'source_entitlement_observed',
+            'handler_version': 'lumen-handler-v2',
+            'received_at': result.get('received_at') or source_event['occurred_at'],
+            'processed_at': result.get('processed_at') or source_event['occurred_at'],
+            'outcome': outcome, 'reason_code': ('source_unavailable' if outcome == 'unknown'
+                else 'handler_failure' if failed else 'handler_completed'),
+            'projection_version': 'lumen-handler-v2',
+            'adapter_version': 'adapty-profile-read-v1',
+            'transaction_id': transaction_id, 'source_hash': profile['source_fingerprint'],
+            'processing_id': processing_id,
+            'trace_id': result['trace_id'], 'steps': result['steps'],
+            'revisions': result['revisions']}
+        try:
+            queued = self.sdk.emit('handler_completed', profile['user_id'],
+                details['processed_at'], details,
+                event_id='handler:'+processing_id, source_event_id=source_event['event_id'],
+                correlation_id=result['trace_id'], schema_version=2)
+        except Exception:
+            return False
+        return bool(queued and (queued.get('accepted') is True or queued.get('queued') is True))
+
+    def _handle_live_source_observation(self, profile, source_event, processing_id=None):
+        """Run the application's real receive→handler→transactional projection path."""
+        user_id = profile.get('user_id')
+        entitlement = profile.get('entitlement') or {}
+        transaction_id = entitlement.get('transaction_id')
+        fingerprint = profile.get('source_fingerprint')
+        if (not user_id or not transaction_id or not fingerprint or not source_event
+                or profile.get('status') != 'active'
+                or profile.get('identity_match') is not True
+                or profile.get('provider_customer_id') != user_id):
+            return {'user_id': user_id, 'outcome': 'diagnostic_only',
+                    'reason': 'source_transaction_not_eligible'}
+        processing_id = processing_id or 'source-handler:'+digest(
+            {'user_id': user_id, 'source_fingerprint': fingerprint})
+        previous = domain.lumen_handler_result(self.db_path, processing_id)
+        if previous:
+            if (previous.get('user_id') != user_id
+                    or previous.get('transaction_id') != transaction_id
+                    or previous.get('source_fingerprint') != fingerprint):
+                raise RecoveryError('Processing ID is already bound to different source evidence', 409)
+            self._emit_handler_completed(profile, processing_id, source_event, previous['result'])
+            return previous['result']
+        received_at = self.wall_now_precise()
+        trace_id = 'trace:'+digest({'processing_id': processing_id})
+        rows = domain.lumen_accounts(self.db_path, limit=500)['items']
+        local = next((row for row in rows if row['user_id'] == user_id), None)
+        if local is None:
+            return {'user_id': user_id, 'outcome': 'failed', 'reason': 'identity_unknown'}
+        current = domain.lumen_access(self.db_path, user_id)
+        same_projection = bool(current.get('active')
+            and current.get('expires_at') == entitlement.get('expires_at')
+            and current.get('entitlement_hash') == entitlement.get('entitlement_hash'))
+        if (same_projection and current.get('allowed') is True
+                and local.get('identity_status') == 'mapped'
+                and local.get('policy_enabled')):
+            result = {'user_id': user_id, 'outcome': 'completed',
+                'received_at': received_at, 'processed_at': received_at,
+                'trace_id': trace_id, 'transaction_id': transaction_id,
+                'steps': [
+                    {'name':'receive','status':'completed','owner':'lumen','result':'accepted'},
+                    {'name':'source_observation','status':'completed','owner':'source','result':'observed'},
+                    {'name':'identity_check','status':'completed','owner':'engine','result':'verified','revision':local['identity_revision']},
+                    {'name':'policy_check','status':'completed','owner':'lumen','result':'verified','revision':local['policy_revision']},
+                    {'name':'projection_readback','status':'completed','owner':'lumen','result':'matched','revision':local['projection_revision']},
+                    {'name':'gate_readback','status':'completed','owner':'lumen','result':'allowed','revision':local['cache_revision']}],
+                'revisions': {'identity': local['identity_revision'],
+                    'policy': local['policy_revision'], 'projection': local['projection_revision'],
+                    'cache': local['cache_revision']}}
+            result['processed_at'] = self.wall_now_precise()
+            result['telemetry_gap'] = not self._emit_handler_completed(
+                profile, processing_id, source_event, result)
+            domain.lumen_save_handler_result(self.db_path, processing_id, user_id,
+                transaction_id, fingerprint, 'completed', result, received_at)
+            return result
+        body = {'schema_version': 2, 'user_id': user_id,
+            'expected_provider_customer_id': local['provider_customer_id'],
+            'expected_identity_revision': local['identity_revision'],
+            'expected_policy_revision': local['policy_revision'],
+            'expected_projection_revision': local['projection_revision'],
+            'entitlement': {key: entitlement[key] for key in ('product_id','expires_at',
+                'entitlement_hash','transaction_id','source_fingerprint','store','source_environment')},
+            'operation_key': 'source-handler:'+digest({'user_id':user_id,
+                'processing_id':processing_id}), 'processing_id': processing_id,
+            'trace_id': trace_id}
+        if isinstance(entitlement.get('original_transaction_id'),str) and entitlement['original_transaction_id']:
+            body['entitlement']['original_transaction_id'] = entitlement['original_transaction_id']
+        try:
+            response = self._lumen_post('/internal/lumen/resync', body)
+            if isinstance(response, tuple):
+                response, close = response
+                if close:
+                    raise TimeoutError('Lumen response closed after commit')
+            result = {'user_id': user_id, 'outcome': 'completed',
+                'received_at': received_at, 'processed_at': received_at,
+                'trace_id': trace_id, 'transaction_id': transaction_id,
+                'steps': response['steps'], 'revisions': response['revisions'],
+                'operation_key': body['operation_key'],
+                'projection_revision': response['projection_revision'],
+                'cache_revision': response['cache_revision'],
+                'cache_skipped': response['cache_skipped']}
+            if response['cache_skipped']:
+                result.update(outcome='failed',reason='cache_refresh_skipped')
+        except Exception as exc:
+            action = domain.lumen_action(self.db_path, body['operation_key'])
+            committed = bool(action and action.get('operation_key') == body['operation_key']
+                and action.get('processing_id') == processing_id
+                and action.get('user_id') == user_id
+                and action.get('transaction_id') == transaction_id)
+            try:
+                access = domain.lumen_access(self.db_path, user_id)
+            except (KeyError, sqlite3.Error):
+                access = None
+            projection_matches = bool(access and access.get('active') is True
+                and access.get('expires_at') == entitlement.get('expires_at')
+                and access.get('entitlement_hash') == entitlement.get('entitlement_hash'))
+            gate_allowed = None if access is None else access.get('allowed')
+            if committed and projection_matches and gate_allowed is True:
+                outcome, reason = 'completed', 'committed_readback'
+            elif committed and (access is None or gate_allowed is None):
+                outcome, reason = 'diagnostic_only', 'readback_unknown'
+            elif committed:
+                outcome, reason = 'failed', 'gate_or_projection_mismatch'
+            elif isinstance(exc, SourceReadUnavailable):
+                outcome, reason = 'diagnostic_only', 'source_unavailable'
+            elif isinstance(exc, (RecoveryError, InternalHTTPError, ValueError, KeyError, TypeError)):
+                outcome, reason = 'failed', 'handler_failure'
+            else:
+                outcome, reason = 'diagnostic_only', 'readback_unknown'
+            if committed:
+                steps = list(action.get('steps') or [])
+                revisions = dict(action.get('revisions') or {})
+            else:
+                steps = [
+                    {'name':'receive','status':'completed','owner':'lumen','result':'accepted'},
+                    {'name':'source_observation','status':'completed','owner':'source','result':'observed'},
+                    {'name':'handler','status':'failed' if outcome == 'failed' else 'unknown',
+                     'owner':'lumen','result':'failed' if outcome == 'failed' else 'unknown',
+                     'reason_code':'handler_failure' if outcome == 'failed' else 'readback_unknown'}]
+                revisions = {'identity':local['identity_revision'],'policy':local['policy_revision'],
+                    'projection':local['projection_revision'],'cache':local['cache_revision']}
+                if isinstance(exc, SourceReadUnavailable):
+                    steps.insert(2,{'name':'fresh_source_read','status':'unknown','owner':'source',
+                        'result':'unavailable','reason_code':'source_unavailable'})
+            if access is None:
+                steps.extend([
+                    {'name':'projection_readback','status':'unknown','owner':'lumen','result':'unavailable',
+                     'reason_code':'readback_unknown'},
+                    {'name':'gate_readback','status':'unknown','owner':'lumen','result':'unknown',
+                     'reason_code':'readback_unknown'}])
+            else:
+                steps.extend([
+                    {'name':'projection_readback','status':'completed','owner':'lumen',
+                     'result':'matched' if projection_matches else 'mismatched',
+                     **({} if projection_matches else {'reason_code':'projection_mismatch'})},
+                    {'name':'gate_readback',
+                     'status':'completed' if gate_allowed is not None else 'unknown',
+                     'owner':'lumen',
+                     'result':'allowed' if gate_allowed is True else
+                         'denied' if gate_allowed is False else 'unknown',
+                     **({'reason_code':'timeout_after_commit'} if committed
+                         and isinstance(exc,TimeoutError) else
+                        {'reason_code':'gate_denied'} if gate_allowed is False else
+                        {'reason_code':'readback_unknown','gap':True}
+                            if gate_allowed is None else {})}])
+                revisions.update({'identity':access['identity_revision'],
+                    'policy':access['policy_revision'],
+                    'projection':access['projection_revision'],
+                    'cache':access['cache_revision']})
+            result = {'user_id':user_id,'outcome':outcome,
+                'received_at':received_at,'processed_at':self.wall_now_precise(),
+                'trace_id':trace_id,'transaction_id':transaction_id,'reason':reason,
+                'steps':steps,'revisions':revisions,'operation_key':body['operation_key'],
+                'error_class':('recovery_http_'+str(exc.status)
+                    if isinstance(exc,RecoveryError) else
+                    'internal_http_'+str(exc.status)
+                    if isinstance(exc,InternalHTTPError) else type(exc).__name__)}
+        result['processed_at'] = self.wall_now_precise()
+        result['telemetry_gap'] = not self._emit_handler_completed(
+            profile, processing_id, source_event, result)
+        domain.lumen_save_handler_result(self.db_path, processing_id, user_id,
+            transaction_id, fingerprint, result['outcome'], result, received_at)
+        return result
+
+    @staticmethod
+    def _live_observation_items(profiles, processing_ids=None):
         items = []
+        if not profiles:
+            return items
         for profile in profiles:
             if not profile.get('source_fingerprint') or not profile.get('observed_at'):
                 continue
             entitlement = profile.get('entitlement') or {}
-            items.append({'user_id': profile['user_id'],
+            item = {'user_id': profile['user_id'],
                 'source_fingerprint': profile['source_fingerprint'],
                 'observed_at': profile['observed_at'],
                 'starts_at': entitlement.get('starts_at'),
                 'expires_at': entitlement.get('expires_at'),
-                'reason': profile.get('reason')})
+                'reason': profile.get('reason'),
+                'status': profile.get('status'),
+                'identity_match': profile.get('identity_match'),
+                'provider_customer_id': profile.get('provider_customer_id'),
+                'transaction_id': entitlement.get('transaction_id'),
+                'original_transaction_id': entitlement.get('original_transaction_id'),
+                'store': entitlement.get('store'),
+                'source_environment': entitlement.get('source_environment'),
+                'access_level': entitlement.get('access_level_id'),
+                'product_id': entitlement.get('product_id'),
+                'entitlement_hash': entitlement.get('entitlement_hash')}
+            if processing_ids and profile['user_id'] in processing_ids:
+                item['processing_id'] = processing_ids[profile['user_id']]
+            items.append(item)
+        return items
+
+    def _notify_live_source_observations(self, profiles, processing_ids=None):
+        items = self._live_observation_items(profiles, processing_ids)
         if items:
-            internal_request(self.key, self.lumen_url, 'POST',
+            return internal_request(self.key, self.lumen_url, 'POST',
                 '/internal/lumen/source-observed', {'items': items}, timeout=30)
+        return {'accepted':0,'telemetry_emitted':0,'handled':0,'failed':0,'writes':0}
+
+    def _deliver_live_source_handlers(self, profiles, processing_ids):
+        items = self._live_observation_items(profiles, processing_ids)
+        if not items or any(not item.get('processing_id') for item in items):
+            raise RecoveryError('Normal handler delivery requires processing IDs')
+        return internal_request(self.key, self.lumen_url, 'POST',
+            '/internal/lumen/handler/deliver', {'items': items}, timeout=120)
 
     def _flush_sdk(self):
         while True:
@@ -346,6 +612,840 @@ class RecoveryService:
             except Exception:
                 pass
             time.sleep(1)
+
+    def _start_fulfillment_watcher(self):
+        if self._fulfillment_thread is not None:
+            return
+        self._fulfillment_thread = threading.Thread(target=self._fulfillment_watch_loop,
+            name='live-fulfillment-watch', daemon=True)
+        self._fulfillment_thread.start()
+
+    def _fulfillment_watch_loop(self):
+        next_source, next_local = 0.0, 0.0
+        while not self._fulfillment_stop.is_set():
+            now = time.monotonic()
+            source_due = now >= next_source
+            local_due = source_due or self._fulfillment_wake.is_set() or now >= next_local
+            if local_due:
+                self._fulfillment_wake.clear()
+                try:
+                    result = self._live_fulfillment_audit(refresh_source=source_due)
+                    wait_for = max(LIVE_SOURCE_POLL_SECONDS,
+                                   int(result.get('retry_after_seconds') or 0))
+                except Exception as exc:
+                    self._set_fulfillment_coverage({'waiting_reason':
+                        'audit_unavailable:'+type(exc).__name__, 'complete': False,
+                        'updated_at': self.wall_now()})
+                    wait_for = LIVE_SOURCE_POLL_SECONDS
+                now = time.monotonic()
+                next_local = now+self._live_duration(LIVE_LOCAL_AUDIT_SECONDS)
+                if source_due:
+                    next_source = now+wait_for
+            delay = max(0.1, min(next_local, next_source)-time.monotonic())
+            self._fulfillment_wake.wait(delay)
+
+    def _set_fulfillment_coverage(self, coverage):
+        db = _conn(self.db_path)
+        try:
+            db.execute('BEGIN IMMEDIATE')
+            _set_meta(db, 'fulfillment_coverage', coverage)
+            db.execute('COMMIT')
+        except Exception:
+            if db.in_transaction:
+                db.execute('ROLLBACK')
+            raise
+        finally:
+            db.close()
+
+    def _live_profile_scope_matches(self, profile, user_id):
+        entitlement = (profile or {}).get('entitlement') or {}
+        return bool(profile and profile.get('app_id') == recovery_live.APP_ID
+            and profile.get('user_id') == user_id
+            and entitlement.get('app_id') == recovery_live.APP_ID
+            and entitlement.get('user_id') == user_id
+            and entitlement.get('provider_customer_id') == user_id
+            and entitlement.get('source_environment') == self.live_config.get('source_environment')
+            and entitlement.get('store') in ('app_store','play_store'))
+
+    def _fulfillment_source_right(self, profile, user_id, now):
+        entitlement = (profile or {}).get('entitlement') or {}
+        try:
+            fresh_age = (now-parse_time(profile['observed_at'])).total_seconds()
+            current = (0 <= fresh_age <= 300 and profile.get('status') == 'active'
+                and profile.get('identity_match') is True
+                and self._live_profile_scope_matches(profile,user_id)
+                and entitlement.get('user_id') == user_id
+                and entitlement.get('provider_customer_id') == user_id
+                and entitlement.get('app_id') == recovery_live.APP_ID
+                and entitlement.get('is_in_grace_period') is False
+                and parse_time(entitlement['starts_at']) <= now
+                < parse_time(entitlement['expires_at']))
+        except (KeyError, RecoveryError, TypeError):
+            fresh_age, current = float('inf'), False
+        return entitlement, current, fresh_age
+
+    def _live_fulfillment_audit(self, *, refresh_source=False,
+                                handler_batch_complete=False):
+        with self._simulation_inject_lock:
+            return self._live_fulfillment_audit_locked(
+                refresh_source=refresh_source,
+                handler_batch_complete=handler_batch_complete)
+
+    def _live_fulfillment_audit_locked(self, *, refresh_source=False,
+                                       handler_batch_complete=False):
+        if not self.live_config or self._manifest().get('scenario') != 'live_adapty':
+            return {'waiting_reason': 'live_source_not_configured'}
+        source_result = None
+        source_error = None
+        if refresh_source:
+            try:
+                registry = self._pages(self.provider_url, '/internal/provider/accounts')
+                source_result = internal_request(self.key, self.provider_url, 'POST',
+                    '/internal/live/refresh', {'user_ids': [row['user_id'] for row in registry]},
+                    timeout=60)
+            except Exception as exc:
+                source_error = type(exc).__name__
+        try:
+            observations = self._observations()
+            source = observations.get('live_source') or {}
+            profiles = observations['profiles_by_id']
+            clients = observations['clients_by_id']
+            full_count = len(observations['scope_ids'])
+            last_source_pass = source.get('last_source_pass') or {}
+            source_pass_fresh = False
+            try:
+                pass_age = (datetime.now(timezone.utc)-parse_time(
+                    last_source_pass['completed_at'])).total_seconds()
+                source_pass_fresh = (0 <= pass_age <= 300
+                    and last_source_pass.get('requested') == full_count
+                    and last_source_pass.get('observed') == full_count
+                    and not last_source_pass.get('waiting_reason'))
+            except (KeyError,RecoveryError,TypeError):
+                pass
+            cached_poll = bool(source_result and
+                source_result.get('waiting_reason') == 'source_poll_interval'
+                and source_pass_fresh)
+            source_complete = bool(source_result is not None
+                and source_result.get('observed') == source_result.get('requested') == full_count)
+            source_complete = source_complete or cached_poll
+            if source_result and source_complete:
+                self._notify_live_source_observations(observations['adapty_profiles'])
+            waiting_reason = None
+            if refresh_source and not source_complete:
+                waiting_reason = ((source_result or {}).get('waiting_reason')
+                                  or ('source_unavailable' if source_error else 'source_incomplete'))
+            elif source.get('source_cooldown_seconds', 0):
+                waiting_reason = 'source_cooldown'
+            elif not source.get('last_source_pass') or source['last_source_pass'].get('waiting_reason'):
+                waiting_reason = (source.get('last_source_pass') or {}).get('waiting_reason') or 'source_unavailable'
+            try:
+                last_source_at = parse_time(source.get('source_observed_at'))
+                source_age = (datetime.now(timezone.utc)-last_source_at).total_seconds()
+                cached_source_fresh = 0 <= source_age <= 300
+            except RecoveryError:
+                cached_source_fresh = False
+            source_fresh = bool(not waiting_reason and cached_source_fresh
+                and (source_complete or not refresh_source)
+                and source.get('observed_count') == full_count)
+            now = datetime.now(timezone.utc)
+            normal_processing_seconds = self._live_duration(LIVE_NEW_RIGHT_GRACE_SECONDS)
+            receipt_keys = {(user_id, (profile.get('entitlement') or {}).get('transaction_id'),
+                             profile.get('source_fingerprint'))
+                            for user_id, profile in profiles.items()
+                            if (profile.get('entitlement') or {}).get('transaction_id')
+                            and profile.get('source_fingerprint')}
+            receipts = self._live_processing_receipts(receipt_keys)
+            pending, current = [], []
+            db = _conn(self.db_path)
+            try:
+                db.execute('BEGIN IMMEDIATE')
+                for user_id in observations['scope_ids']:
+                    profile = profiles.get(user_id) or {}
+                    client = clients.get(user_id) or {}
+                    entitlement, source_right, source_age = self._fulfillment_source_right(
+                        profile, user_id, now)
+                    handler_result = observations.get('handler_results_by_key',{}).get((
+                        user_id, entitlement.get('transaction_id'),
+                        profile.get('source_fingerprint')))
+                    handler_failed = bool(handler_result and handler_result.get('outcome') == 'failed')
+                    provider = observations['provider_by_id'].get(user_id) or {}
+                    identity_ok = bool(provider.get('identity_status') == 'mapped'
+                        and provider.get('provider_customer_id') == user_id
+                        and client.get('identity_status') == 'mapped'
+                        and client.get('provider_customer_id') == user_id
+                        and profile.get('identity_match') is True)
+                    key = {'app': recovery_live.APP_ID,
+                        'source_environment': entitlement.get('source_environment') or
+                            self.live_config.get('source_environment', ''),
+                        'store': entitlement.get('store') or '',
+                        'transaction_id': entitlement.get('transaction_id') or '',
+                        'customer_id': user_id,
+                        'access_level': entitlement.get('access_level_id') or 'premium'}
+                    key_json = _json(key)
+                    source_version = digest({'starts_at': entitlement.get('starts_at'),
+                        'expires_at': entitlement.get('expires_at'),
+                        'fingerprint': profile.get('source_fingerprint'),
+                        'status': profile.get('status'), 'reason': profile.get('reason')})
+                    expectation_id = digest({'key': key, 'source_version': source_version})
+                    row = db.execute('SELECT * FROM fulfillment_expectations WHERE expectation_id=?',
+                                     (expectation_id,)).fetchone()
+                    previous = dict(row) if row else None
+                    version = (previous['version'] if previous else
+                        1+db.execute('SELECT COALESCE(MAX(version),0) FROM fulfillment_expectations WHERE key_json=?',
+                                     (key_json,)).fetchone()[0])
+                    source_record = {name: entitlement.get(name) for name in (
+                        'transaction_id','original_transaction_id','store','source_environment',
+                        'access_level_id','product_id','starts_at','expires_at',
+                        'entitlement_hash','source_fingerprint','is_in_grace_period')}
+                    application = {name: client.get(name) for name in (
+                        'identity_revision','policy_revision','projection_revision','cache_revision',
+                        'access_active','access_expires_at','entitlement_hash')}
+                    application['gate'] = client.get('gate')
+                    projection_matches = bool(client and client.get('access_active')
+                        and client.get('access_expires_at') == entitlement.get('expires_at')
+                        and client.get('entitlement_hash') == entitlement.get('entitlement_hash'))
+                    if not source_fresh:
+                        status, reason = 'inconclusive', waiting_reason or 'source_observation_stale'
+                    elif not self._live_profile_scope_matches(profile,user_id):
+                        status, reason = 'inconclusive', 'source_scope_mismatch'
+                    elif not identity_ok:
+                        status, reason = 'inconclusive', 'identity_scope_mismatch'
+                    elif profile.get('status') != 'active' or not source_right:
+                        status, reason = 'inconclusive', profile.get('reason') or 'source_right_not_current'
+                    elif not entitlement.get('transaction_id'):
+                        status, reason = 'inconclusive', 'transaction_link_missing'
+                    elif not client:
+                        status, reason = 'inconclusive', 'application_not_observed'
+                    elif not client.get('policy_enabled'):
+                        status, reason = 'inconclusive', 'policy_restricted'
+                    elif client.get('gate', {}).get('allowed') is None and projection_matches:
+                        status, reason = 'inconclusive', 'gate_unobserved'
+                    elif projection_matches and client.get('gate', {}).get('allowed') is True:
+                        status, reason = 'verified_application', 'source_period_and_gate_match'
+                    elif projection_matches and client.get('gate', {}).get('allowed') is False:
+                        if client.get('gate', {}).get('reason') in (
+                                'cache_stale','subscription_inactive','subscription_expired'):
+                            status, reason = 'discrepancy', 'gate_denied_despite_matching_projection'
+                        else:
+                            status, reason = 'inconclusive', 'gate_denial_not_explained'
+                    elif handler_failed:
+                        status, reason = 'discrepancy', 'handler_processing_failed'
+                    elif not previous and (now-parse_time(profile['observed_at'])).total_seconds() < normal_processing_seconds:
+                        status, reason = 'awaiting_application', 'normal_processing_window'
+                    elif (previous and previous['status'] != 'verified_application'
+                            and not previous.get('episode_no')
+                            and (now-parse_time(previous['first_observed_at'])).total_seconds()
+                                < normal_processing_seconds):
+                        status, reason = 'awaiting_application', 'normal_processing_window'
+                    else:
+                        status, reason = 'discrepancy', (
+                            'projection_mismatch' if not projection_matches else
+                            'gate_denied_despite_matching_projection')
+                    receipt_found = (user_id, entitlement.get('transaction_id'),
+                                     entitlement.get('source_fingerprint')) in receipts
+                    telemetry_gap = bool(status == 'verified_application' and not receipt_found)
+                    first_seen = (previous['first_observed_at'] if previous
+                                  else self.wall_now_precise())
+                    episode_no = previous['episode_no'] if previous else 0
+                    episode_open = previous['episode_open'] if previous else 0
+                    incident_id = previous['incident_id'] if previous else None
+                    if status == 'discrepancy' and episode_open and incident_id:
+                        prior_decision = db.execute('SELECT status FROM automatic_recovery '
+                            'WHERE incident_id=? ORDER BY attempt DESC LIMIT 1',(incident_id,)).fetchone()
+                        if prior_decision and prior_decision['status'] == 'completed':
+                            episode_open = 0
+                    if status == 'discrepancy' and not episode_open:
+                        episode_no += 1
+                        episode_open = 1
+                        incident_id = None
+                    elif status == 'verified_application':
+                        episode_open = 0
+                    elif status == 'inconclusive' and profile.get('status') == 'inactive':
+                        episode_open = 0
+                    updated = self.wall_now_precise()
+                    changed = (previous is None or previous['status'] != status
+                        or previous['reason'] != reason
+                        or previous['episode_no'] != episode_no
+                        or previous['telemetry_gap'] != int(telemetry_gap))
+                    db.execute('INSERT INTO fulfillment_expectations(expectation_id,key_json,source_version,version,period_start,period_end,source_fingerprint,original_transaction_id,status,reason,first_observed_at,last_observed_at,incident_id,episode_no,episode_open,telemetry_gap,source_json,application_json,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(expectation_id) DO UPDATE SET status=excluded.status,reason=excluded.reason,last_observed_at=excluded.last_observed_at,incident_id=CASE WHEN excluded.episode_no>fulfillment_expectations.episode_no THEN excluded.incident_id ELSE COALESCE(fulfillment_expectations.incident_id,excluded.incident_id) END,episode_no=excluded.episode_no,episode_open=excluded.episode_open,telemetry_gap=excluded.telemetry_gap,application_json=excluded.application_json,updated_at=excluded.updated_at',
+                        (expectation_id,key_json,source_version,version,
+                         entitlement.get('starts_at'),entitlement.get('expires_at'),
+                         profile.get('source_fingerprint'),entitlement.get('original_transaction_id'),
+                         status,reason,first_seen,updated,incident_id,episode_no,int(episode_open),
+                         int(telemetry_gap),_json(source_record),_json(application),updated))
+                    if changed:
+                        activity_id = 'fulfillment:'+digest({'expectation': expectation_id,
+                            'status': status, 'reason': reason, 'episode': episode_no,
+                            'updated_at': updated})
+                        details = {'status': status, 'reason': reason,
+                            'version': version,
+                            'transaction_id': entitlement.get('transaction_id'),
+                            'period_start': entitlement.get('starts_at'),
+                            'period_end': entitlement.get('expires_at'),
+                            'telemetry_gap': telemetry_gap}
+                        db.execute('INSERT OR IGNORE INTO fulfillment_activity VALUES(?,?,?,?,?,?)',
+                            (activity_id,expectation_id,incident_id,updated,status,_json(details)))
+                        trace_id = 'trace:'+digest({'expectation': expectation_id,
+                            'status': status, 'reason': reason, 'episode': episode_no,
+                            'updated_at': updated})
+                        steps = [
+                            {'name': 'fresh_source_read', 'status': 'completed' if source_fresh else 'unknown',
+                             'owner': 'source', 'result': 'verified' if source_fresh else 'unavailable'},
+                            {'name': 'identity_check',
+                             'status': 'completed' if identity_ok else 'failed' if provider and client and profile else 'unknown',
+                             'owner': 'engine', 'result': 'verified' if identity_ok else 'failed' if provider and client and profile else 'unknown'},
+                            {'name': 'policy_check',
+                             'status': 'completed' if client and client.get('policy_enabled') else 'failed' if client else 'unknown',
+                             'owner': 'lumen', 'result': 'verified' if client and client.get('policy_enabled') else 'failed' if client else 'unknown'},
+                            {'name': 'projection_readback',
+                             'status': 'completed' if client and projection_matches else 'failed' if client else 'unknown',
+                             'owner': 'lumen', 'result': 'matched' if client and projection_matches else 'mismatched' if client else 'unknown',
+                             'revision': (client or {}).get('projection_revision') or 0},
+                            {'name': 'gate_readback',
+                             'status': 'completed' if client and client.get('gate',{}).get('allowed') is True else 'failed' if client and client.get('gate',{}).get('allowed') is False else 'unknown',
+                             'owner': 'lumen', 'result': 'allowed' if client and client.get('gate',{}).get('allowed') is True else 'denied' if client and client.get('gate',{}).get('allowed') is False else 'unknown',
+                             'revision': (client or {}).get('cache_revision') or 0},
+                        ]
+                        if handler_failed:
+                            steps.insert(2, {'name':'handler','status':'failed',
+                                'owner':'lumen','result':'failed',
+                                'reason_code':'handler_failure'})
+                        if telemetry_gap:
+                            steps.append({'name': 'telemetry_enqueue', 'status': 'unknown',
+                                'owner': 'collector', 'result': 'unavailable', 'gap': True,
+                                'reason_code': 'telemetry_gap'})
+                        trace = {'trace_id': trace_id, 'expectation_id': expectation_id,
+                            'incident_id': incident_id, 'user_id': user_id,
+                            'key': key, 'version': version, 'episode_no': episode_no,
+                            'transaction_id': entitlement.get('transaction_id'),
+                            'source_fingerprint': profile.get('source_fingerprint'),
+                            **({'processing_id':handler_result.get('processing_id'),
+                                'processing_trace_id':(handler_result.get('result') or {}).get('trace_id'),
+                                'processing_outcome':handler_result.get('outcome')}
+                               if handler_result else {}),
+                            'status': status, 'reason': reason, 'telemetry_gap': telemetry_gap,
+                            'source_period': {'starts_at': entitlement.get('starts_at'),
+                                'expires_at': entitlement.get('expires_at')},
+                            'next_step': ('Review source identity/period' if not identity_ok else
+                                'Wait for source-backed entitlement before resync' if not source_fresh else
+                                'No write; source period and Lumen gate already match' if status == 'verified_application' else
+                                'Read back the local projection and gate before any repair' if not entitlement.get('transaction_id') else
+                                'Reconcile the existing source transaction to the Lumen projection'),
+                            'steps': steps, 'created_at': updated}
+                        db.execute('INSERT OR IGNORE INTO fulfillment_traces VALUES(?,?,?,?,?,?)',
+                            (trace_id,expectation_id,incident_id,user_id,_json(trace),updated))
+                    current.append({'expectation_id': expectation_id, 'user_id': user_id,
+                        'version': version, 'status': status, 'reason': reason, 'episode_no': episode_no,
+                        'episode_open': bool(episode_open), 'incident_id': incident_id,
+                        'eligible': status == 'discrepancy' and bool(entitlement.get('transaction_id')),
+                        'trace_id': None})
+                    if episode_open and not incident_id and status == 'discrepancy':
+                        pending.append({'expectation_id': expectation_id, 'user_id': user_id,
+                                        'episode_no': episode_no})
+                db.execute('COMMIT')
+            except Exception:
+                if db.in_transaction:
+                    db.execute('ROLLBACK')
+                raise
+            finally:
+                db.close()
+            incident_id = None
+            if (pending and source_fresh and self.auto_repair
+                    and (handler_batch_complete or self._live_initial_bootstrap_complete())):
+                pending_ids = sorted(item['expectation_id']+':'+str(item['episode_no'])
+                                     for item in pending)
+                trigger_id = 'fulfillment:'+digest(pending_ids)
+                at = datetime.now(timezone.utc)
+                signature = self._live_denial_cohort_signature(pending)
+                incident_id, _ = self._start_incident(pending[0]['user_id'], iso(at),
+                    iso(at-timedelta(minutes=5)), iso(at+timedelta(minutes=5)),
+                    trigger_event_id=trigger_id, cohort_signature=signature,
+                    fulfillment_claims=pending)
+                db = _conn(self.db_path)
+                try:
+                    db.execute('BEGIN IMMEDIATE')
+                    db.executemany('UPDATE fulfillment_expectations SET incident_id=? WHERE expectation_id=? AND episode_no=? AND episode_open=1 AND incident_id IS NULL',
+                        [(incident_id,item['expectation_id'],item['episode_no']) for item in pending])
+                    db.execute('UPDATE fulfillment_activity SET incident_id=? WHERE expectation_id IN ('+
+                        ','.join('?' for _ in pending)+') AND incident_id IS NULL',
+                        [incident_id]+[item['expectation_id'] for item in pending])
+                    db.execute('UPDATE fulfillment_traces SET incident_id=? WHERE expectation_id IN ('+
+                        ','.join('?' for _ in pending)+') AND incident_id IS NULL',
+                        [incident_id]+[item['expectation_id'] for item in pending])
+                    db.execute('COMMIT')
+                except Exception:
+                    if db.in_transaction:
+                        db.execute('ROLLBACK')
+                    raise
+                finally:
+                    db.close()
+                self._bind_handler_receipts_to_incident(incident_id,pending)
+            coverage = {'complete': source_fresh and observations['complete'],
+                'waiting_reason': waiting_reason, 'source_fresh': source_fresh,
+                'handler_results_available':observations.get('handler_results_available',True),
+                'source_requests_total': source.get('source_requests_total', 0),
+                'last_source_request_at': source.get('last_source_request_at'),
+                'last_source_pass': source.get('last_source_pass'),
+                'source_calls_last_pass': ((last_source_pass.get('source_calls',0)
+                    if cached_poll else (source_result or {}).get('source_calls',
+                    last_source_pass.get('source_calls',0)))),
+                'observed_accounts': sum(bool(item.get('observed_at')) for item in observations['adapty_profiles']),
+                'total_accounts': full_count, 'updated_at': self.wall_now()}
+            summary = {}
+            for item in current:
+                summary[item['status']] = summary.get(item['status'], 0)+1
+            coverage['fulfillments'] = summary
+            if pending and not self.auto_repair:
+                coverage['waiting_reason'] = 'automatic_repair_disabled'
+            self._set_fulfillment_coverage(coverage)
+            return {'waiting_reason': coverage['waiting_reason'],
+                'incident_id': incident_id,
+                'retry_after_seconds': (source_result or {}).get('not_before') and max(0,
+                    int((parse_time(source_result['not_before'])-datetime.now(timezone.utc)).total_seconds()))}
+        except Exception:
+            raise
+
+    def _live_processing_receipts(self, receipt_keys):
+        db = _conn(self.db_path)
+        try:
+            result = set()
+            for user_id, transaction_id, source_fingerprint in receipt_keys:
+                row = db.execute('SELECT 1 FROM fulfillment_receipts WHERE user_id=? AND transaction_id=? AND source_fingerprint=?',
+                                 (user_id, transaction_id, source_fingerprint)).fetchone()
+                if row:
+                    result.add((user_id, transaction_id, source_fingerprint))
+            return result
+        finally:
+            db.close()
+
+    def _fulfillments(self, cursor=None, limit=50, status=None):
+        if not self.live_config:
+            raise RecoveryError('Fulfillment monitoring is available only in live Adapty mode', 404)
+        try:
+            offset = int(cursor or 0)
+        except (TypeError, ValueError) as exc:
+            raise RecoveryError('Invalid fulfillment cursor') from exc
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 200 or offset < 0:
+            raise RecoveryError('Invalid fulfillment page')
+        allowed = {'awaiting_application','verified_application','discrepancy','inconclusive'}
+        if status is not None and status not in allowed:
+            raise RecoveryError('Unsupported fulfillment status')
+        db = _conn(self.db_path)
+        try:
+            where, params = (' WHERE status=?', [status]) if status else ('', [])
+            total = db.execute('SELECT COUNT(*) FROM fulfillment_expectations'+where, params).fetchone()[0]
+            rows = db.execute('SELECT * FROM fulfillment_expectations'+where+
+                ' ORDER BY updated_at DESC,expectation_id LIMIT ? OFFSET ?',
+                (*params, limit, offset)).fetchall()
+            coverage = _meta(db, 'fulfillment_coverage', {})
+            items = []
+            for row in rows:
+                source, application = json.loads(row['source_json']), json.loads(row['application_json'])
+                gate = application.get('gate') or {}
+                projection_matches = bool(application.get('access_active')
+                    and application.get('access_expires_at') == source.get('expires_at')
+                    and application.get('entitlement_hash') == source.get('entitlement_hash'))
+                trace = db.execute('SELECT trace_id,trace_json FROM fulfillment_traces '
+                    'WHERE expectation_id=? ORDER BY updated_at DESC LIMIT 1',
+                    (row['expectation_id'],)).fetchone()
+                trace_data = {} if trace is None else json.loads(trace['trace_json'])
+                items.append({'expectation_id': row['expectation_id'],
+                    'key': json.loads(row['key_json']), 'version': row['version'],
+                    'source_version': row['source_version'], 'status': row['status'],
+                    'reason': row['reason'], 'source_period': {
+                        'starts_at': row['period_start'], 'expires_at': row['period_end']},
+                    'source_fingerprint': row['source_fingerprint'],
+                    'original_transaction_id': row['original_transaction_id'],
+                    'first_observed_at': row['first_observed_at'],
+                    'last_observed_at': row['last_observed_at'],
+                    'episode_no': row['episode_no'], 'episode_open': bool(row['episode_open']),
+                    'incident_id': row['incident_id'],
+                    'stages': {'source_recorded': bool(row['source_fingerprint']),
+                        'application_applied': projection_matches,
+                        'access_verified': projection_matches and gate.get('allowed') is True},
+                    'application': application,
+                    'telemetry_gap': bool(row['telemetry_gap']),
+                    'trace_ref': None if trace is None or not row['incident_id'] else
+                        '/api/recovery/incidents/'+row['incident_id']+'/trace',
+                    'trace_id': None if trace is None else trace['trace_id'],
+                    'next_step': trace_data.get('next_step')})
+            next_cursor = str(offset+len(items)) if offset+len(items) < total else None
+            return {'items': items, 'pagination': {'cursor': str(offset),
+                'limit': limit, 'next_cursor': next_cursor, 'total': total,
+                'status': status}, 'coverage': coverage}
+        finally:
+            db.close()
+
+    def _fulfillment_trace(self, incident_id):
+        if not self.live_config:
+            raise RecoveryError('Fulfillment traces are available only in live Adapty mode', 404)
+        db = _conn(self.db_path)
+        try:
+            db.execute('BEGIN')
+            incident = db.execute('SELECT incident_json FROM incidents WHERE id=?',
+                                  (incident_id,)).fetchone()
+            if incident is None:
+                raise RecoveryError('Unknown incident', 404)
+            traces = [json.loads(row['trace_json']) for row in db.execute(
+                'SELECT trace_json FROM fulfillment_traces WHERE incident_id=? ORDER BY updated_at,trace_id',
+                (incident_id,))]
+            expectation_ids = sorted({item['expectation_id'] for item in traces})
+            historical = {}
+            receipts_by_event = {}
+            for trace in traces:
+                expectation_id = trace['expectation_id']
+                historical[expectation_id] = {'expectation_id': expectation_id,
+                    'key': trace.get('key'), 'version': trace.get('version'),
+                    'status': trace.get('status'), 'reason': trace.get('reason'),
+                    'source_period': trace.get('source_period'),
+                    'source_fingerprint': trace.get('source_fingerprint'),
+                    'episode_no': trace.get('episode_no'),
+                    'incident_id': trace.get('incident_id'),
+                    'trace_id': trace.get('trace_id')}
+                if trace.get('transaction_id') and trace.get('source_fingerprint'):
+                    for receipt in db.execute('SELECT event_id,trace_id,transaction_id,steps_json,recorded_at '
+                            'FROM fulfillment_receipts WHERE incident_id=? AND user_id=? '
+                            'AND transaction_id=? AND source_fingerprint=? ORDER BY recorded_at,event_id',
+                            (incident_id,trace.get('user_id'),trace['transaction_id'],
+                             trace['source_fingerprint'])):
+                        receipts_by_event[receipt['event_id']] = {
+                            'event_id': receipt['event_id'], 'trace_id': receipt['trace_id'],
+                            'user_id': trace.get('user_id'),
+                            'transaction_id': receipt['transaction_id'],
+                            'steps': json.loads(receipt['steps_json']),
+                            'recorded_at': receipt['recorded_at']}
+            current_fulfillments = []
+            for expectation_id in expectation_ids:
+                row = db.execute('SELECT * FROM fulfillment_expectations WHERE expectation_id=?',
+                                 (expectation_id,)).fetchone()
+                if row is not None:
+                    current_fulfillments.append({'expectation_id': expectation_id,
+                        'key': json.loads(row['key_json']), 'version': row['version'],
+                        'status': row['status'], 'reason': row['reason'],
+                        'source_period': {'starts_at': row['period_start'],
+                            'expires_at': row['period_end'], 'fingerprint': row['source_fingerprint']},
+                        'episode_no': row['episode_no'], 'episode_open': bool(row['episode_open']),
+                        'incident_id': row['incident_id'], 'updated_at': row['updated_at']})
+            expectations = list(historical.values())
+            receipts = list(receipts_by_event.values())
+            activity = [{'occurred_at': row['occurred_at'], 'kind': row['kind'],
+                         'details': json.loads(row['details_json'])}
+                for row in db.execute('SELECT occurred_at,kind,details_json FROM fulfillment_activity '
+                    'WHERE incident_id=? ORDER BY occurred_at,activity_id', (incident_id,))]
+            coverage = _meta(db, 'fulfillment_coverage', {})
+            manifest = {key: _meta(db,key) for key in ('app','environment','run_id','provenance',
+                'payment_verification','seed_revision')}
+            db.execute('COMMIT')
+            return {'incident_id': incident_id, 'incident': json.loads(incident['incident_json']),
+                'expectations': expectations, 'traces': traces, 'processing_receipts': receipts,
+                'current_fulfillments': current_fulfillments,
+                'activity': activity, 'coverage': coverage,
+                'provenance': {key: value for key,value in manifest.items() if value is not None}}
+        except Exception:
+            if db.in_transaction:
+                db.execute('ROLLBACK')
+            raise
+        finally:
+            db.close()
+
+    def _export_recovery(self, from_value=None, to_value=None, format='json'):
+        if not self.live_config:
+            raise RecoveryError('Recovery export is available only in live Adapty mode', 404)
+        if format not in ('csv','json'):
+            raise RecoveryError('Export format must be csv or json')
+        export_now = datetime.now(timezone.utc)
+        end = export_now if to_value is None else parse_time(to_value, 'export to')
+        start = end-timedelta(hours=24) if from_value is None else parse_time(from_value, 'export from')
+        if start >= end:
+            raise RecoveryError('Export period must be a non-empty UTC interval')
+        start_text, end_text = iso_precise(start), iso_precise(end)
+
+        def in_period(value):
+            if not value:
+                return False
+            try:
+                parsed = parse_time(value)
+            except RecoveryError:
+                return False
+            return start <= parsed < end
+
+        db = _conn(self.db_path)
+        try:
+            db.execute('BEGIN')
+            export_time = self.wall_now_precise()
+            incident_rows = [dict(row) for row in db.execute(
+                'SELECT id,incident_json,created_at FROM incidents ORDER BY created_at,rowid')]
+            incident_by_id = {row['id']: row for row in incident_rows}
+            plan_rows = [dict(row) for row in db.execute(
+                'SELECT id,incident_id,plan_json,status,created_at_wall,expires_at_wall FROM plans ORDER BY created_at_wall,rowid')]
+            plan_incident = {row['id']: row['incident_id'] for row in plan_rows}
+            action_rows = [dict(row) for row in db.execute('SELECT * FROM actions')]
+            decision_rows = [dict(row) for row in db.execute('SELECT * FROM automatic_recovery')]
+            activity_rows = [dict(row) for row in db.execute('SELECT * FROM fulfillment_activity')]
+            selected = {row['id'] for row in incident_rows if in_period(row['created_at'])}
+            selected.update(plan_incident[row['plan_id']] for row in action_rows
+                if row['plan_id'] in plan_incident and
+                (in_period(row.get('started_at')) or in_period(row.get('finished_at'))))
+            selected.update(row['incident_id'] for row in activity_rows
+                if row.get('incident_id') and in_period(row['occurred_at']))
+            selected.update(row['incident_id'] for row in decision_rows
+                if in_period(row.get('updated_at')))
+            selected = sorted(selected & incident_by_id.keys())
+            db.execute('CREATE TEMP TABLE export_selected_incidents(id TEXT PRIMARY KEY)')
+            db.executemany('INSERT INTO export_selected_incidents VALUES(?)',
+                           ((item,) for item in selected))
+            snapshots = [dict(row) for row in db.execute(
+                'SELECT s.* FROM snapshots s JOIN export_selected_incidents e ON e.id=s.incident_id '
+                'ORDER BY s.created_at,s.id')]
+            selected_plans = [row for row in plan_rows if row['incident_id'] in set(selected)]
+            selected_plan_ids = {row['id'] for row in selected_plans}
+            selected_actions = [row for row in action_rows if row['plan_id'] in selected_plan_ids]
+            selected_decisions = [row for row in decision_rows if row['incident_id'] in set(selected)]
+            selected_activity = [row for row in activity_rows if row.get('incident_id') in set(selected)]
+            selected_traces = [dict(row) for row in db.execute(
+                'SELECT t.* FROM fulfillment_traces t JOIN export_selected_incidents e '
+                'ON e.id=t.incident_id ORDER BY t.updated_at,t.trace_id')]
+            expectations = [dict(row) for row in db.execute(
+                'SELECT f.* FROM fulfillment_expectations f JOIN export_selected_incidents e '
+                'ON e.id=f.incident_id ORDER BY f.updated_at,f.expectation_id')]
+            selected_jobs = []
+            all_jobs = [dict(row) for row in db.execute('SELECT * FROM jobs ORDER BY created_at,rowid')]
+            related_job_ids = {row['auto_job_id'] for row in selected_decisions if row.get('auto_job_id')}
+            related_job_ids.update(row['execution_job_id'] for row in selected_decisions
+                                   if row.get('execution_job_id'))
+            for job in all_jobs:
+                try:
+                    payload = json.loads(job['payload'])
+                except (TypeError, json.JSONDecodeError):
+                    payload = {}
+                if job['id'] in related_job_ids or payload.get('incident_id') in set(selected) or (
+                        payload.get('plan_id') in selected_plan_ids):
+                    selected_jobs.append(job)
+            selected_expectation_ids = {row['expectation_id'] for row in expectations}
+            selected_receipts = []
+            user_ids = set()
+            for row in expectations:
+                key = json.loads(row['key_json'])
+                user_id, txn = key.get('customer_id'), key.get('transaction_id')
+                if user_id:
+                    user_ids.add(user_id)
+                if user_id and txn and row.get('source_fingerprint'):
+                    receipt_rows = db.execute('SELECT * FROM fulfillment_receipts WHERE user_id=? '
+                        'AND transaction_id=? AND source_fingerprint=? ORDER BY recorded_at,event_id',
+                        (user_id,txn,row['source_fingerprint'])).fetchall()
+                    selected_receipts.extend(dict(receipt) for receipt in receipt_rows)
+            for trace in selected_traces:
+                user_ids.add(trace['user_id'])
+                data = json.loads(trace['trace_json'])
+                selected_expectation_ids.add(data['expectation_id'])
+            present_expectations = {row['expectation_id'] for row in expectations}
+            for expectation_id in selected_expectation_ids-present_expectations:
+                row = db.execute('SELECT * FROM fulfillment_expectations WHERE expectation_id=?',
+                                 (expectation_id,)).fetchone()
+                if row:
+                    expectations.append(dict(row))
+            event_rows = []
+            if user_ids:
+                for row in db.execute('SELECT event_json,recorded_at FROM collector_events ORDER BY recorded_at,event_id'):
+                    try:
+                        event = json.loads(row['event_json'])
+                    except (TypeError, json.JSONDecodeError):
+                        continue
+                    if event.get('app_user_id') in user_ids:
+                        event_rows.append({'recorded_at': row['recorded_at'], 'event': event})
+            selected_expectations = []
+            if selected_expectation_ids:
+                for row in expectations:
+                    if row['expectation_id'] in selected_expectation_ids:
+                        selected_expectations.append(row)
+            else:
+                selected_expectations = expectations
+            manifest = {key: _meta(db,key) for key in ('app','environment','run_id','provenance',
+                'payment_verification','seed_revision','source_environment')}
+            coverage = _meta(db, 'fulfillment_coverage', {})
+            records = []
+            for incident_id in selected:
+                incident_row = incident_by_id[incident_id]
+                incident_data = json.loads(incident_row['incident_json'])
+                incident_plans = [row for row in selected_plans if row['incident_id'] == incident_id]
+                incident_plan_ids = {row['id'] for row in incident_plans}
+                incident_actions = [row for row in selected_actions if row['plan_id'] in incident_plan_ids]
+                incident_snapshots = [json.loads(row['snapshot_json']) for row in snapshots
+                                      if row['incident_id'] == incident_id]
+                affected_ids = set(incident_data.get('confirmed_ids', []))
+                if not affected_ids:
+                    affected_ids.update(account['id'] for snapshot in incident_snapshots
+                        for account in snapshot.get('accounts', []) if account.get('status') == 'confirmed')
+                verified_ids = set()
+                actions_by_id = {row['id']: row for row in incident_actions}
+                for plan in incident_plans:
+                    for entry in json.loads(plan['plan_json']).get('entries', []):
+                        account_id = entry.get('account_id')
+                        if not account_id:
+                            continue
+                        affected_ids.add(account_id)
+                        action = actions_by_id.get(entry['id'])
+                        if entry.get('type') != 'verify_gate' or not action or not action.get('started_at'):
+                            continue
+                        result = json.loads(action['result']) if action.get('result') else {}
+                        if action['status'] == 'verified' and result.get('allowed') is True:
+                            verified_ids.add(account_id)
+                        else:
+                            verified_ids.discard(account_id)
+                incident_decisions = [row for row in selected_decisions if row['incident_id'] == incident_id]
+                incident_activity = [row for row in selected_activity if row.get('incident_id') == incident_id]
+                incident_traces = [row for row in selected_traces if row['incident_id'] == incident_id]
+                incident_expectations = []
+                trace_expectation_ids = {json.loads(row['trace_json'])['expectation_id']
+                                         for row in incident_traces}
+                for row in selected_expectations:
+                    if row['expectation_id'] in trace_expectation_ids:
+                        incident_expectations.append({'expectation_id': row['expectation_id'],
+                            'key': json.loads(row['key_json']), 'version': row['version'],
+                            'source_version': row['source_version'], 'status': row['status'],
+                            'reason': row['reason'], 'period_start': row['period_start'],
+                            'period_end': row['period_end'], 'source_fingerprint': row['source_fingerprint'],
+                            'original_transaction_id': row['original_transaction_id'],
+                            'source': json.loads(row['source_json']),
+                            'application': json.loads(row['application_json']),
+                            'telemetry_gap': bool(row['telemetry_gap']), 'episode_no': row['episode_no']})
+                current_fulfillments = incident_expectations
+                incident_expectations = []
+                for current in current_fulfillments:
+                    assessments = [json.loads(row['trace_json']) for row in incident_traces
+                        if row['expectation_id'] == current['expectation_id']]
+                    if assessments:
+                        historical = assessments[-1]
+                        incident_expectations.append({**current,
+                            'status': historical['status'], 'reason': historical['reason'],
+                            'telemetry_gap': historical.get('telemetry_gap'),
+                            'episode_no': historical.get('episode_no'), 'application': None,
+                            'assessment_at': historical['created_at']})
+                incident_job_ids = set()
+                for job in selected_jobs:
+                    try:
+                        payload = json.loads(job['payload'])
+                    except (TypeError, json.JSONDecodeError):
+                        continue
+                    if payload.get('incident_id') == incident_id or payload.get('plan_id') in incident_plan_ids:
+                        incident_job_ids.add(job['id'])
+                incident_job_ids.update(value for row in incident_decisions for value in
+                    (row.get('auto_job_id'),row.get('execution_job_id')) if value)
+                incident_expectation_keys = {(row['key']['customer_id'],
+                    row['key']['transaction_id'],row.get('source_fingerprint'))
+                    for row in incident_expectations if row['key'].get('customer_id')
+                    and row['key'].get('transaction_id')}
+                incident_user_ids = {key[0] for key in incident_expectation_keys}
+                incident_data_records = {'id': incident_id, 'detected_at': incident_row['created_at'],
+                    'summary': {'affected_accounts': len(affected_ids),
+                        'repaired_accounts': len(verified_ids),
+                        'unresolved_accounts': len(affected_ids-verified_ids)},
+                    'incident': incident_data,
+                    'snapshots': incident_snapshots,
+                    'plans': [json.loads(row['plan_json']) for row in incident_plans],
+                    'actions': [{**{key: row[key] for key in ('id','plan_id','account_id','owner',
+                        'target','preconditions','status','started_at','finished_at','evidence_ref')},
+                        'result': None if not row['result'] else json.loads(row['result'])}
+                        for row in incident_actions],
+                    'automatic_recovery': [{**{key: row[key] for key in row.keys()
+                        if key != 'outcome_json'}, 'outcome': None if not row['outcome_json']
+                        else json.loads(row['outcome_json'])} for row in incident_decisions],
+                    'jobs': [{**{key: row[key] for key in row.keys() if key not in ('payload','result')},
+                        'payload': json.loads(row['payload']),
+                        'result': None if not row['result'] else json.loads(row['result'])}
+                        for row in selected_jobs if row['id'] in incident_job_ids or
+                            any(row['id'] in (decision.get('auto_job_id'),decision.get('execution_job_id'))
+                                for decision in incident_decisions)],
+                    'fulfillments': incident_expectations,
+                    'current_fulfillments': current_fulfillments,
+                    'activity': [{'occurred_at': row['occurred_at'], 'kind': row['kind'],
+                        'details': json.loads(row['details_json'])} for row in incident_activity],
+                    'traces': [json.loads(row['trace_json']) for row in incident_traces],
+                    'processing_receipts': [dict(row) | {'steps': json.loads(row['steps_json']),
+                        'scope': 'incident'}
+                        for row in selected_receipts if row.get('incident_id') == incident_id and (row['user_id'],row['transaction_id'],
+                            row['source_fingerprint']) in incident_expectation_keys],
+                    'telemetry': [row for row in event_rows if
+                        row['event'].get('app_user_id') in incident_user_ids]}
+                records.append(incident_data_records)
+            db.execute('COMMIT')
+        except Exception:
+            if db.in_transaction:
+                db.execute('ROLLBACK')
+            raise
+        finally:
+            db.close()
+        provenance = {key: manifest[key] for key in ('app','environment','provenance',
+            'payment_verification','source_environment','seed_revision') if manifest.get(key) is not None}
+        metadata = {'period': {'from': start_text, 'to': end_text,
+            'interval': '[from,to)'}, 'export_time': export_time,
+            'coverage': coverage, 'provenance': provenance}
+        if format == 'json':
+            # Source snapshots retain private evidence; exports use normalized fields.
+            def public(value):
+                private = {'raw_source_profile', 'custom_attributes', 'installation_meta',
+                    'authorization', 'api_key', 'secret', 'password', 'purchase_token',
+                    'receipt', 'raw_receipt', 'headers', 'request_body'}
+                if isinstance(value, dict):
+                    return {key: public(item) for key, item in value.items()
+                            if key.lower() not in private}
+                if isinstance(value, list):
+                    return [public(item) for item in value]
+                return value
+            return public({**metadata, 'incident_count': len(records), 'incidents': records})
+        output = io.StringIO(newline='')
+        writer = csv.writer(output, lineterminator='\n')
+        columns = ['record_type','incident_id','detected_at','first_attempt_at','last_activity_at',
+            'status','affected_accounts','repaired_accounts','unresolved_accounts',
+            'owner','error','next_step','trace_ref','period_from','period_to',
+            'export_time','coverage_json','provenance_json']
+        writer.writerow(columns)
+        if not records:
+            metadata_row = {'record_type':'export_metadata','status':'metadata',
+                'period_from':start_text,'period_to':end_text,'export_time':export_time,
+                'coverage_json':_json(coverage),'provenance_json':_json(provenance)}
+            writer.writerow([self._csv_safe(metadata_row.get(column,'')) for column in columns])
+        for item in records:
+            actions = item['actions']
+            started = sorted((row['started_at'] for row in actions if row.get('started_at')), key=parse_time)
+            activity_times = [row['occurred_at'] for row in item['activity']]
+            activity_times.extend(value for row in actions for value in
+                (row.get('started_at'),row.get('finished_at')) if value)
+            activity_times.extend(row.get('updated_at') for row in item['automatic_recovery']
+                                  if row.get('updated_at'))
+            decisions = item['automatic_recovery']
+            latest_decision = max(decisions,key=lambda row:(parse_time(row['updated_at']),row.get('attempt',0))) if decisions else None
+            if latest_decision and latest_decision['status'] == 'completed':
+                status_value = 'repaired'
+            elif latest_decision and latest_decision['status'] == 'unresolved':
+                status_value = 'unresolved'
+            else:
+                status_value = item['incident'].get('status','detecting')
+            if item['summary']['affected_accounts'] and not item['summary']['unresolved_accounts']:
+                status_value = 'repaired'
+            elif status_value == 'repaired':
+                status_value = 'unresolved'
+            latest_action = max(actions,key=lambda row:parse_time(row.get('finished_at') or row.get('started_at')) if row.get('finished_at') or row.get('started_at') else datetime.min.replace(tzinfo=timezone.utc)) if actions else None
+            reason = None
+            if latest_action and latest_action.get('result'):
+                reason = latest_action['result'].get('reason')
+            latest_trace = item['traces'][-1] if item['traces'] else None
+            next_step = latest_trace.get('next_step') if latest_trace else None
+            values = ['incident',item['id'],item['detected_at'],started[0] if started else '',
+                max(activity_times,key=parse_time) if activity_times else '',status_value,
+                item['summary']['affected_accounts'],item['summary']['repaired_accounts'],
+                item['summary']['unresolved_accounts'],
+                ','.join(sorted({row['owner'] for row in actions if row.get('owner')})),
+                reason or '',next_step or 'Review the incident trace',
+                '/api/recovery/incidents/'+item['id']+'/trace',start_text,end_text,export_time,
+                _json(coverage),_json(provenance)]
+            writer.writerow([self._csv_safe(value) for value in values])
+        return output.getvalue().encode('utf-8')
+
+    @staticmethod
+    def _csv_safe(value):
+        text = '' if value is None else str(value)
+        return "'"+text if text.lstrip().startswith(('=','+','-','@')) or text.startswith(('\t','\r','\n')) else text
 
     def _init_engine(self):
         db = _conn(self.db_path)
@@ -360,8 +1460,19 @@ class RecoveryService:
                 'CREATE TABLE IF NOT EXISTS actions(id TEXT PRIMARY KEY,plan_id TEXT NOT NULL,account_id TEXT,owner TEXT NOT NULL,target TEXT NOT NULL,preconditions TEXT NOT NULL,status TEXT NOT NULL,started_at TEXT,finished_at TEXT,evidence_ref TEXT,result TEXT)',
                 'CREATE TABLE IF NOT EXISTS automatic_recovery(id TEXT PRIMARY KEY,incident_id TEXT NOT NULL,assessment_snapshot_id TEXT NOT NULL,attempt INTEGER NOT NULL,policy_id TEXT NOT NULL,status TEXT NOT NULL,selected_ids TEXT NOT NULL,auto_job_id TEXT NOT NULL,plan_id TEXT,execution_job_id TEXT,outcome_json TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,UNIQUE(incident_id,attempt),UNIQUE(incident_id,assessment_snapshot_id))',
                 'CREATE TABLE IF NOT EXISTS simulations(id TEXT PRIMARY KEY,operation_key TEXT NOT NULL UNIQUE,status TEXT NOT NULL,sequence_json TEXT NOT NULL,current_index INTEGER NOT NULL,total INTEGER NOT NULL,completed INTEGER NOT NULL,stop_requested INTEGER NOT NULL,current_incident_id TEXT,error TEXT,job_id TEXT NOT NULL UNIQUE,created_at TEXT NOT NULL,updated_at TEXT NOT NULL)',
+                'CREATE TABLE IF NOT EXISTS simulation_intents(operation_key TEXT PRIMARY KEY,simulation_id TEXT NOT NULL,cycle_no INTEGER NOT NULL,user_id TEXT NOT NULL,fault_mode TEXT NOT NULL,processing_id TEXT NOT NULL,status TEXT NOT NULL,incident_id TEXT,result_json TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL)',
                 'CREATE TABLE IF NOT EXISTS collector_events(event_id TEXT PRIMARY KEY,payload_hash TEXT NOT NULL,event_json TEXT NOT NULL,recorded_at TEXT NOT NULL,provenance TEXT NOT NULL)',
                 'CREATE TABLE IF NOT EXISTS collector_assessments(event_id TEXT PRIMARY KEY,result TEXT NOT NULL)',
+                'CREATE TABLE IF NOT EXISTS fulfillment_receipts(event_id TEXT PRIMARY KEY,user_id TEXT NOT NULL,transaction_id TEXT NOT NULL,source_fingerprint TEXT NOT NULL,trace_id TEXT NOT NULL,action_id TEXT,incident_id TEXT,steps_json TEXT NOT NULL,recorded_at TEXT NOT NULL)',
+                'CREATE INDEX IF NOT EXISTS fulfillment_receipts_source ON fulfillment_receipts(user_id,transaction_id,source_fingerprint,recorded_at,event_id)',
+                'CREATE INDEX IF NOT EXISTS fulfillment_receipts_incident ON fulfillment_receipts(incident_id,recorded_at,event_id)',
+                'CREATE TABLE IF NOT EXISTS fulfillment_expectations(expectation_id TEXT PRIMARY KEY,key_json TEXT NOT NULL,source_version TEXT NOT NULL,version INTEGER NOT NULL,period_start TEXT,period_end TEXT,source_fingerprint TEXT,original_transaction_id TEXT,status TEXT NOT NULL,reason TEXT NOT NULL,first_observed_at TEXT NOT NULL,last_observed_at TEXT NOT NULL,incident_id TEXT,episode_no INTEGER NOT NULL DEFAULT 0,episode_open INTEGER NOT NULL DEFAULT 0,telemetry_gap INTEGER NOT NULL DEFAULT 0,source_json TEXT NOT NULL,application_json TEXT NOT NULL,updated_at TEXT NOT NULL,UNIQUE(key_json,source_version))',
+                'CREATE INDEX IF NOT EXISTS fulfillment_expectations_updated ON fulfillment_expectations(updated_at DESC,expectation_id)',
+                'CREATE TABLE IF NOT EXISTS fulfillment_activity(activity_id TEXT PRIMARY KEY,expectation_id TEXT NOT NULL,incident_id TEXT,occurred_at TEXT NOT NULL,kind TEXT NOT NULL,details_json TEXT NOT NULL)',
+                'CREATE INDEX IF NOT EXISTS fulfillment_activity_time ON fulfillment_activity(occurred_at,activity_id)',
+                'CREATE TABLE IF NOT EXISTS fulfillment_traces(trace_id TEXT PRIMARY KEY,expectation_id TEXT NOT NULL,incident_id TEXT,user_id TEXT NOT NULL,trace_json TEXT NOT NULL,updated_at TEXT NOT NULL)',
+                'CREATE INDEX IF NOT EXISTS fulfillment_traces_incident ON fulfillment_traces(incident_id,updated_at)',
+                'CREATE INDEX IF NOT EXISTS fulfillment_traces_user ON fulfillment_traces(user_id,updated_at,trace_id)',
                 'CREATE TABLE IF NOT EXISTS journal(seq INTEGER PRIMARY KEY AUTOINCREMENT,at TEXT NOT NULL,action TEXT NOT NULL,details TEXT NOT NULL)',
             ):
                 db.execute(statement)
@@ -428,6 +1539,18 @@ class RecoveryService:
     def wall_now_precise():
         return iso_precise(datetime.now(timezone.utc))
 
+    def _live_duration(self, seconds):
+        if not (self.demo and self.live_bootstrap_pending):
+            return seconds
+        db = _conn(self.db_path)
+        try:
+            scale = _meta(db, 'demo_simulation_clock_scale', 1)
+        finally:
+            db.close()
+        if type(scale) is not int or scale < 1:
+            scale = 1
+        return max(0.01, seconds/scale)
+
     def scenario_now(self):
         db = _conn(self.db_path)
         try:
@@ -448,13 +1571,79 @@ class RecoveryService:
     def _simulation_summary(self):
         db = _conn(self.db_path)
         try:
-            row = db.execute('SELECT status,completed,total,error FROM simulations '
+            row = db.execute('SELECT id,job_id,status,completed,total,error,sequence_json FROM simulations '
                              'ORDER BY created_at DESC,rowid DESC LIMIT 1').fetchone()
             if row is None:
-                return {'status': 'idle', 'completed': 0, 'total': 0, 'error': None}
-            return {'status': 'running' if row['status'] == 'queued' else row['status'],
+                status = {'status': 'idle', 'completed': 0, 'total': 0, 'error': None}
+            else:
+                sequence = json.loads(row['sequence_json'])
+                status = {'status': 'running' if row['status'] == 'queued' else row['status'],
+                    'simulation_id': row['id'],
                     'completed': row['completed'], 'total': row['total'],
-                    'error': row['error']}
+                    'error': row['error'],
+                    'continuous': bool(sequence and sequence[0].get('mode') == 'continuous'),
+                    'seed': sequence[0].get('seed') if sequence else None}
+                job = db.execute('SELECT result FROM jobs WHERE id=?',(row['job_id'],)).fetchone()
+                if job and job['result']:
+                    status['result'] = json.loads(job['result'])
+                cycle = db.execute('SELECT result_json FROM simulation_intents WHERE simulation_id=? '
+                    "AND cycle_no>0 AND status='completed' AND result_json IS NOT NULL ORDER BY cycle_no DESC LIMIT 1",
+                    (row['id'],)).fetchone()
+                if cycle:
+                    status['last_cycle'] = json.loads(cycle['result_json'])
+            if self.live_bootstrap_pending:
+                bootstrap = None
+                for candidate in db.execute('SELECT id,status,sequence_json FROM simulations '
+                        'ORDER BY created_at DESC,rowid DESC'):
+                    sequence = json.loads(candidate['sequence_json'])
+                    if sequence and sequence[0].get('mode') == 'bootstrap':
+                        bootstrap = candidate
+                        break
+                bootstrap_status = 'not_started' if bootstrap is None else bootstrap['status']
+                status['bootstrap_required'] = bootstrap_status != 'completed'
+                status['bootstrap_status'] = bootstrap_status
+                if bootstrap is not None:
+                    status['bootstrap_simulation_id'] = bootstrap['id']
+            else:
+                status['bootstrap_required'] = False
+                status['bootstrap_status'] = 'not_required'
+            status['waiting_reason'] = _meta(db, 'simulation_waiting_reason')
+        finally:
+            db.close()
+        if self.live_config:
+            try:
+                source=internal_request(self.key,self.provider_url,'GET','/internal/live/status')
+                status['source_requests_total']=source.get('source_requests_total',0)
+                status['source_cooldown_seconds']=source.get('source_cooldown_seconds',0)
+                status['last_source_pass']=source.get('last_source_pass')
+            except Exception:
+                status['source_status_available']=False
+        return status
+
+    def _live_initial_bootstrap_complete(self):
+        if not self.live_bootstrap_pending:
+            return True
+        db = _conn(self.db_path)
+        try:
+            for row in db.execute('SELECT status,sequence_json FROM simulations '
+                    'ORDER BY created_at DESC,rowid DESC'):
+                sequence = json.loads(row['sequence_json'])
+                if sequence and sequence[0].get('mode') == 'bootstrap':
+                    return row['status'] == 'completed'
+            return False
+        finally:
+            db.close()
+
+    def _set_simulation_waiting(self, reason):
+        db = _conn(self.db_path)
+        try:
+            db.execute('BEGIN IMMEDIATE')
+            _set_meta(db, 'simulation_waiting_reason', reason)
+            db.execute('COMMIT')
+        except Exception:
+            if db.in_transaction:
+                db.execute('ROLLBACK')
+            raise
         finally:
             db.close()
 
@@ -500,6 +1689,7 @@ class RecoveryService:
 
     def _observations(self, fresh_live_ids=None):
         gaps = []
+        source_refresh_reused = False
         def pages(base, path, label):
             try:
                 return self._pages(base, path)
@@ -514,7 +1704,10 @@ class RecoveryService:
                 refresh = internal_request(self.key, self.provider_url, 'POST',
                     '/internal/live/refresh', {'user_ids': fresh_live_ids}, timeout=60)
                 if refresh.get('observed') != len(fresh_live_ids):
-                    gaps.append('live_source_observation_incomplete')
+                    source_refresh_reused = bool(refresh.get('waiting_reason') == 'source_poll_interval'
+                        and self._has_fresh_complete_source_pass())
+                    if not source_refresh_reused:
+                        gaps.append('live_source_observation_incomplete')
             except Exception as exc:
                 gaps.append('live_source_refresh:'+(str(exc.status) if isinstance(exc, InternalHTTPError) else type(exc).__name__))
         profiles = pages(self.provider_url, '/internal/adapty/profiles', 'adapty_profiles')
@@ -526,9 +1719,14 @@ class RecoveryService:
             gaps.append('adapty_catalog:'+(str(exc.status) if isinstance(exc, InternalHTTPError) else type(exc).__name__))
             catalog = {'items': [], 'revision': None}
         clients = pages(self.lumen_url, '/internal/lumen/accounts', 'client_registry')
-        if manifest.get('scenario') == 'live_adapty' and fresh_live_ids:
-            fresh_profiles = [item for item in profiles if item.get('user_id') in set(fresh_live_ids)]
-            self._notify_live_source_observations(fresh_profiles)
+        handler_results_available = True
+        handler_results = []
+        if manifest.get('scenario') == 'live_adapty':
+            try:
+                handler_results = self._pages(self.lumen_url,
+                    '/internal/lumen/handler/results')
+            except Exception:
+                handler_results_available = False
         history_hash = hashlib.sha256()
         for item in source_history:
             history_hash.update(domain.canonical(item).encode('utf-8'))
@@ -548,6 +1746,11 @@ class RecoveryService:
         entitlements_by_id = {row['user_id']: row.get('entitlement') for row in profiles
                               if row.get('entitlement')}
         clients_by_id = {row['user_id']: row for row in clients}
+        handler_results_by_key = {}
+        for row in handler_results:
+            key = (row.get('user_id'),row.get('transaction_id'),row.get('source_fingerprint'))
+            if all(isinstance(value,str) and value for value in key):
+                handler_results_by_key[key] = row
         scope_ids = sorted(set(provider_by_id) | set(clients_by_id)
                            | {row['user_id'] for row in evidence if row.get('user_id')})
         if manifest.get('scenario') == 'live_adapty':
@@ -558,6 +1761,8 @@ class RecoveryService:
                 gaps.append('live_profiles_not_fully_observed')
             if live_source.get('identity_match_count') != len(providers):
                 gaps.append('live_identity_scope_mismatch')
+            if live_source.get('source_cooldown_seconds',0):
+                gaps.append('adapty_source_cooldown')
             complete = not gaps
         else:
             live_source = None
@@ -565,10 +1770,14 @@ class RecoveryService:
         return {'provider_accounts': providers, 'provider_evidence': evidence,
                 'adapty_profiles': profiles, 'catalog': catalog,
                 'lumen_accounts': clients, 'provider_by_id': provider_by_id,
+                'lumen_handler_results': handler_results,
+                'handler_results_available': handler_results_available,
+                'handler_results_by_key': handler_results_by_key,
                 'evidence_by_id': evidence_by_id, 'profiles_by_id': profiles_by_id,
                 'entitlement_evidence': [item for item in entitlements_by_id.values()],
                 'entitlement_by_id': entitlements_by_id, 'live_source': live_source,
                 'clients_by_id': clients_by_id, 'scope_ids': scope_ids,
+                'source_refresh_reused': source_refresh_reused,
                 'source_history_summary': source_history_summary,
                 'observed_at': self.wall_now(), 'scenario_observed_at': iso(self.scenario_now()),
                 'complete': complete, 'gaps': gaps,
@@ -707,7 +1916,23 @@ class RecoveryService:
     def _classify_live(self, observations, incident):
         app_id = self._manifest().get('app')
         now = datetime.now(timezone.utc)
-        signature = incident.get('cohort_signature') or {}
+        normal_processing_seconds = self._live_duration(LIVE_NEW_RIGHT_GRACE_SECONDS)
+        open_incident_users = self._live_open_incident_accounts(incident.get('id'))
+        trigger_failure = None
+        if incident.get('trigger_event_id'):
+            db = _conn(self.db_path)
+            try:
+                row = db.execute('SELECT event_json FROM collector_events WHERE event_id=?',
+                                 (incident['trigger_event_id'],)).fetchone()
+                event = None if row is None else json.loads(row['event_json'])
+                if (event and event.get('schema_version') == 2
+                        and event.get('kind') == 'handler_completed'
+                        and event.get('details',{}).get('outcome') == 'failed'):
+                    trigger_failure = {'user_id': event.get('app_user_id'),
+                        'transaction_id': event.get('details',{}).get('transaction_id'),
+                        'source_fingerprint': event.get('details',{}).get('source_hash')}
+            finally:
+                db.close()
         rows = []
         for user_id in observations['scope_ids']:
             provider = observations['provider_by_id'].get(user_id)
@@ -721,26 +1946,38 @@ class RecoveryService:
                 and provider.get('provider_customer_id') == client.get('provider_customer_id') == user_id
                 and profile.get('identity_match') and profile.get('user_id') == user_id
                 and profile.get('app_id') == app_id)
+            source_scope_ok = self._live_profile_scope_matches(profile,user_id)
+            handler_result = observations.get('handler_results_by_key',{}).get((
+                user_id,(entitlement or {}).get('transaction_id'),
+                (profile or {}).get('source_fingerprint')))
             status, reason, eligible = 'inconclusive', 'source_unavailable', False
-            active = False
-            source_fresh = False
+            active = source_fresh = projection_matches = False
+            incident_window = False
             if profile and profile.get('observed_at'):
                 try:
-                    age = (now-parse_time(profile['observed_at'])).total_seconds()
-                    source_fresh = 0 <= age <= domain.FRESHNESS_TTL
+                    observed_at = parse_time(profile['observed_at'])
+                    age = (now-observed_at).total_seconds()
+                    source_fresh = 0 <= age <= min(domain.FRESHNESS_TTL, 300)
+                    incident_window = (parse_time(incident['window_start']) <= observed_at
+                                       < parse_time(incident['window_end']))
                 except RecoveryError:
                     pass
             if not observations['complete']:
                 reason = 'coverage_incomplete'
             elif not identity_ok:
                 reason = 'identity_unknown'
+            elif not source_scope_ok:
+                reason = 'source_scope_mismatch'
             elif not source_fresh:
                 reason = 'adapty_profile_stale'
             elif profile.get('status') != 'active' or not entitlement:
-                if profile.get('status') == 'inactive':
-                    status, reason = 'legitimate_denial', profile.get('reason', 'premium_entitlement_inactive')
+                source_reason = profile.get('reason', 'premium_entitlement_inactive')
+                if profile.get('status') == 'inactive' and source_reason in (
+                        'premium_entitlement_absent','subscription_not_started',
+                        'subscription_expired'):
+                    status, reason = 'legitimate_denial', source_reason
                 else:
-                    reason = profile.get('reason', 'premium_entitlement_uncertain')
+                    reason = source_reason
             else:
                 try:
                     active = (parse_time(entitlement['starts_at']) <= now
@@ -753,31 +1990,43 @@ class RecoveryService:
                     active = False
                 if not active:
                     status, reason = 'legitimate_denial', 'premium_entitlement_not_current'
+                elif not entitlement.get('transaction_id'):
+                    reason = 'transaction_link_missing'
                 elif client is None:
                     reason = 'client_access_not_observed'
                 elif not client.get('policy_enabled') or gate.get('reason') == 'policy_restricted':
                     status, reason = 'policy_denial', 'policy_restricted'
-                elif gate.get('allowed') is True:
-                    status, reason = 'healthy', 'access_allowed'
+                elif user_id in open_incident_users:
+                    status, reason = 'potential', 'owned_by_open_incident'
                 else:
-                    tag = client.get('delivery_signature') or {}
-                    try:
-                        signature_age = abs((parse_time(incident['occurred_at'])
-                            -parse_time(tag.get('occurred_at'))).total_seconds())
-                        tag_time = parse_time(tag.get('occurred_at'))
-                        in_incident_window = (parse_time(incident['window_start']) <= tag_time
-                                              < parse_time(incident['window_end']))
-                    except (KeyError, RecoveryError, TypeError):
-                        signature_age = float('inf')
-                        in_incident_window = False
-                    signature_match = bool(signature and tag
-                        and tag.get('handler_version') == signature.get('handler_version')
-                        and tag.get('config_version') == signature.get('config_version')
-                        and signature_age <= 120 and in_incident_window)
-                    if signature_match:
-                        status, reason, eligible = 'confirmed', 'access_not_delivered', True
+                    projection_matches = bool(client.get('access_active')
+                        and client.get('access_expires_at') == entitlement.get('expires_at')
+                        and client.get('entitlement_hash') == entitlement.get('entitlement_hash'))
+                    normal_processing = self._live_within_processing_allowance(
+                        user_id, profile, entitlement, now, normal_processing_seconds)
+                    explicit_failure = bool(trigger_failure
+                        and trigger_failure['user_id'] == user_id
+                        and trigger_failure['transaction_id'] == entitlement.get('transaction_id')
+                        and trigger_failure['source_fingerprint'] == profile.get('source_fingerprint'))
+                    explicit_failure = explicit_failure or bool(handler_result
+                        and handler_result.get('outcome') == 'failed')
+                    if not projection_matches:
+                        if normal_processing and not explicit_failure:
+                            status, reason = 'potential', 'normal_processing_window'
+                        else:
+                            status, reason, eligible = 'confirmed', 'projection_mismatch', True
+                    elif gate.get('allowed') is None:
+                        reason = 'gate_unobserved'
+                    elif gate.get('allowed') is True:
+                        status, reason = 'healthy', 'source_period_and_gate_match'
+                    elif (gate.get('reason') in
+                            ('cache_stale', 'subscription_inactive', 'subscription_expired')):
+                        if normal_processing and not explicit_failure:
+                            status, reason = 'potential', 'normal_processing_window'
+                        else:
+                            status, reason, eligible = 'confirmed', 'gate_denied_despite_matching_projection', True
                     else:
-                        status, reason = 'potential', 'unmatched_delivery_discrepancy'
+                        status, reason = 'potential', 'gate_denial_not_explained_by_projection'
             current_profile = bool(active and profile and profile.get('status') == 'active')
             refs = []
             if entitlement:
@@ -798,13 +2047,68 @@ class RecoveryService:
                 'occurred_at': incident.get('occurred_at'),
                 'observed_at': (entitlement or {}).get('observed_at') or (profile or {}).get('observed_at'),
                 'identity_revision': (client or {}).get('identity_revision'),
+                'provider_customer_id': (client or {}).get('provider_customer_id'),
                 'policy_revision': (client or {}).get('policy_revision'),
                 'projection_revision': (client or {}).get('projection_revision'),
                 'cache_revision': (client or {}).get('cache_revision'),
                 'adapty_revision': (profile or {}).get('source_revision'),
                 'catalog_mapped': None,
+                'source_transaction_id': (entitlement or {}).get('transaction_id'),
+                'processing_outcome': None if handler_result is None else handler_result.get('outcome'),
+                'processing_id': None if handler_result is None else handler_result.get('processing_id'),
+                'original_transaction_id': (entitlement or {}).get('original_transaction_id'),
+                'store': (entitlement or {}).get('store'),
+                'source_environment': (entitlement or {}).get('source_environment'),
+                'access_level': (entitlement or {}).get('access_level_id'),
+                'projection_matches_source_period': projection_matches,
+                'incident_window_match': incident_window,
+                'causal_hypothesis': ({'component': reason, 'certainty': 'observed_mismatch'}
+                    if status == 'confirmed' else None),
                 'entitlement_evidence': entitlement})
         return rows
+
+    def _live_within_processing_allowance(self, user_id, profile, entitlement, now, allowance):
+        key = {'app': recovery_live.APP_ID,
+            'source_environment': entitlement.get('source_environment') or
+                self.live_config.get('source_environment', ''),
+            'store': entitlement.get('store') or '',
+            'transaction_id': entitlement.get('transaction_id') or '',
+            'customer_id': user_id,
+            'access_level': entitlement.get('access_level_id') or 'premium'}
+        source_version = digest({'starts_at':entitlement.get('starts_at'),
+            'expires_at':entitlement.get('expires_at'),
+            'fingerprint':profile.get('source_fingerprint'),
+            'status':profile.get('status'),'reason':profile.get('reason')})
+        expectation_id = digest({'key':key,'source_version':source_version})
+        db = _conn(self.db_path)
+        try:
+            row = db.execute('SELECT first_observed_at,status FROM fulfillment_expectations '
+                'WHERE expectation_id=?', (expectation_id,)).fetchone()
+            if row and row['status'] == 'verified_application':
+                return False
+            if row and db.execute('SELECT 1 FROM fulfillment_activity WHERE kind=? '
+                    'AND expectation_id=? LIMIT 1',
+                    ('verified_application',expectation_id)).fetchone():
+                return False
+            receipt = db.execute('SELECT e.event_json FROM fulfillment_receipts r '
+                'JOIN collector_events e ON e.event_id=r.event_id WHERE r.user_id=? '
+                'AND r.transaction_id=? AND r.source_fingerprint=?',
+                (user_id,entitlement.get('transaction_id'),profile.get('source_fingerprint'))).fetchall()
+            for receipt_row in receipt:
+                event = json.loads(receipt_row['event_json'])
+                if (event.get('kind') == 'handler_completed'
+                        and event.get('details',{}).get('outcome') == 'completed'):
+                    return False
+            first_seen = parse_time(row['first_observed_at']) if row else None
+        finally:
+            db.close()
+        if first_seen is None:
+            try:
+                first_seen = parse_time(profile['observed_at'])
+            except (KeyError, RecoveryError, TypeError):
+                return False
+        age = (now-first_seen).total_seconds()
+        return 0 <= age < allowance
 
     @staticmethod
     def _latest_evidence(records):
@@ -901,8 +2205,23 @@ class RecoveryService:
         incident = self._get_incident(incident_id)
         if (self._manifest().get('scenario') == 'live_adapty'
                 and not incident.get('snapshot_id') and fresh_live_ids is None):
-            fresh_live_ids = [item['user_id'] for item in self._pages(
-                self.provider_url, '/internal/provider/accounts')]
+            db = _conn(self.db_path)
+            try:
+                trigger = db.execute('SELECT event_json FROM collector_events WHERE event_id=?',
+                                     (incident.get('trigger_event_id'),)).fetchone()
+                event = None if trigger is None else json.loads(trigger['event_json'])
+            finally:
+                db.close()
+            if (event and event.get('schema_version') == 2
+                    and event.get('kind') == 'handler_completed'
+                    and event.get('details',{}).get('outcome') == 'failed'):
+                fresh_live_ids = [incident['trigger_user_id']]
+            elif (not event and str(incident.get('trigger_event_id') or '').startswith('fulfillment:')
+                    and self._has_fresh_complete_source_pass()):
+                fresh_live_ids = None
+            else:
+                fresh_live_ids = [item['user_id'] for item in self._pages(
+                    self.provider_url, '/internal/provider/accounts')]
         observations = self._observations(fresh_live_ids=fresh_live_ids)
         if not incident.get('cohort_signature'):
             trigger_evidence = self._latest_evidence(
@@ -954,7 +2273,7 @@ class RecoveryService:
         future_seconds = max(0, int((window_end-self.scenario_now()).total_seconds()))
         inconclusive_accounts = sum(account['status'] == 'inconclusive' for account in accounts)
         coverage_gaps = list(observations['gaps'])
-        if not history:
+        if not history and not observations.get('lumen_handler_results'):
             coverage_gaps.append('customer_event_history_not_observed')
         elif missing_event_users:
             coverage_gaps.append('customer_event_history_incomplete')
@@ -985,6 +2304,9 @@ class RecoveryService:
                                  'entitlement_evidence': len(observations['entitlement_evidence']),
                                  'adapty_profiles': len(observations['adapty_profiles']),
                                  'lumen_accounts': len(observations['lumen_accounts']),
+                                 'handler_results_readback':len(observations.get('lumen_handler_results',[])),
+                                 'handler_results_available':observations.get('handler_results_available',True),
+                                 'source_profile_cache_reused':observations.get('source_refresh_reused',False),
                                  'scope_accounts': len(observations['scope_ids']),
                                  'orphan_provider_records': observations['orphan_provider_records'],
                                  'source_history': observations.get('source_history_summary'),
@@ -1012,6 +2334,22 @@ class RecoveryService:
             current['assessment_summary'] = self._snapshot_summary(snapshot)
             current['status'] = 'scanned'
             db.execute('UPDATE incidents SET incident_json=? WHERE id=?', (_json(current), incident_id))
+            if snapshot['manifest'].get('scenario') == 'live_adapty':
+                claims = []
+                for account in accounts:
+                    if account.get('status') != 'confirmed':
+                        continue
+                    row = db.execute('SELECT * FROM fulfillment_expectations WHERE source_fingerprint=? '
+                        "AND json_extract(key_json,'$.customer_id')=? "
+                        "AND json_extract(key_json,'$.transaction_id')=?",
+                        (account.get('evidence_hash'),account['id'],account.get('source_transaction_id'))).fetchone()
+                    if row:
+                        decision = (None if not row['incident_id'] else db.execute(
+                            'SELECT status FROM automatic_recovery WHERE incident_id=? '
+                            'ORDER BY attempt DESC LIMIT 1',(row['incident_id'],)).fetchone())
+                        opened = row['episode_open'] and not (decision and decision['status']=='completed')
+                        claims.append((row,row['episode_no'] if opened else row['episode_no']+1))
+                self._bind_fulfillment_claims(db,incident_id,claims)
             if (schedule_auto and self.auto_repair
                     and snapshot['manifest'].get('scenario') == 'live_adapty'):
                 selected_ids = sorted(row['id'] for row in accounts
@@ -1043,6 +2381,19 @@ class RecoveryService:
             db.close()
         # The queued policy job is durable before a worker can observe it.
         return snapshot
+
+    def _has_fresh_complete_source_pass(self):
+        try:
+            source=internal_request(self.key,self.provider_url,'GET','/internal/live/status')
+            last=source.get('last_source_pass') or {}
+            age=(datetime.now(timezone.utc)-parse_time(last['completed_at'])).total_seconds()
+            return bool(source.get('source_cooldown_seconds',0) == 0
+                and last.get('requested') == source.get('account_count')
+                and last.get('observed') == source.get('account_count')
+                and not last.get('waiting_reason') and 0 <= age <= 300
+                and source.get('observed_count') == source.get('account_count'))
+        except (InternalHTTPError,KeyError,RecoveryError,TypeError):
+            return False
 
     def _get_incident(self, incident_id):
         db = _conn(self.db_path)
@@ -1135,13 +2486,15 @@ class RecoveryService:
                 self._finish_simulation(payload['simulation_id'], 'failed', str(exc))
             elif kind == 'execution':
                 self._automatic_execution_finished(job_id, None, str(exc))
-        except Exception:
-            self._set_job(job_id, 'failed', error='job_failed')
+        except Exception as exc:
+            failure_code = ('simulation_failed:'+type(exc).__name__
+                if kind == 'simulation' else 'job_failed')
+            self._set_job(job_id, 'failed', error=failure_code)
             if kind == 'automatic_recovery':
                 self._finish_automatic_decision(payload['decision_id'], 'unresolved',
                                                 {'reason': 'job_failed'})
             elif kind == 'simulation':
-                self._finish_simulation(payload['simulation_id'], 'failed', 'Simulation failed')
+                self._finish_simulation(payload['simulation_id'], 'failed', failure_code)
             elif kind == 'execution':
                 self._automatic_execution_finished(job_id, None, 'job_failed')
 
@@ -1334,8 +2687,21 @@ class RecoveryService:
                 'confirmed': counts.get('confirmed', 0),
                 'inconclusive': counts.get('inconclusive', 0)}
 
+    @staticmethod
+    def _bind_fulfillment_claims(db, owner, claims):
+        for row,episode in claims:
+            if (row['episode_open'] and row['episode_no'] == episode
+                    and row['incident_id'] and row['incident_id'] != owner):
+                continue
+            db.execute('UPDATE fulfillment_expectations SET incident_id=?,episode_no=?,episode_open=1 '
+                'WHERE expectation_id=?',(owner,episode,row['expectation_id']))
+            db.execute('UPDATE fulfillment_activity SET incident_id=? WHERE expectation_id=? '
+                'AND incident_id IS NULL',(owner,row['expectation_id']))
+            db.execute('UPDATE fulfillment_traces SET incident_id=? WHERE expectation_id=? '
+                'AND incident_id IS NULL',(owner,row['expectation_id']))
+
     def _start_incident(self, user_id, occurred_at=None, window_start=None, window_end=None,
-                        trigger_event_id=None, cohort_signature=None):
+                        trigger_event_id=None, cohort_signature=None, fulfillment_claims=None):
         manifest = self._manifest()
         if not isinstance(user_id, str) or not user_id.strip() or len(user_id) > 256:
             raise RecoveryError('Invalid user_id')
@@ -1361,7 +2727,44 @@ class RecoveryService:
         try:
             db.execute('BEGIN IMMEDIATE')
             existing = db.execute('SELECT id,incident_json FROM incidents WHERE id=?', (incident_id,)).fetchone()
-            if existing is None and not trigger_event_id:
+            claims = []
+            if manifest.get('scenario') == 'live_adapty':
+                if fulfillment_claims is not None:
+                    for claim in fulfillment_claims:
+                        row = db.execute('SELECT * FROM fulfillment_expectations WHERE expectation_id=?',
+                            (claim['expectation_id'],)).fetchone()
+                        if row and row['episode_open'] and row['episode_no'] == claim['episode_no']:
+                            claims.append((row,row['episode_no']))
+                elif trigger_event_id:
+                    event_row = db.execute('SELECT event_json FROM collector_events WHERE event_id=?',
+                        (trigger_event_id,)).fetchone()
+                    event = None if event_row is None else json.loads(event_row['event_json'])
+                    if event:
+                        details = event.get('details') or {}
+                        rows = db.execute('SELECT * FROM fulfillment_expectations '
+                            "WHERE json_extract(key_json,'$.customer_id')=? "
+                            'ORDER BY first_observed_at DESC,version DESC', (user_id,)).fetchall()
+                        for row in rows:
+                            key = json.loads(row['key_json'])
+                            if event.get('kind') == 'handler_completed' and (
+                                    key.get('transaction_id') != details.get('transaction_id')
+                                    or row['source_fingerprint'] != details.get('source_hash')):
+                                continue
+                            decision = (None if not row['incident_id'] else db.execute(
+                                'SELECT status FROM automatic_recovery WHERE incident_id=? '
+                                'ORDER BY attempt DESC LIMIT 1',(row['incident_id'],)).fetchone())
+                            opened = row['episode_open'] and not (decision and decision['status']=='completed')
+                            claims.append((row,row['episode_no'] if opened else row['episode_no']+1))
+                            break
+                for row,episode in claims:
+                    if row['episode_open'] and row['episode_no'] == episode and row['incident_id']:
+                        owned = db.execute('SELECT id,incident_json FROM incidents WHERE id=?',
+                            (row['incident_id'],)).fetchone()
+                        if owned:
+                            existing = owned
+                            break
+
+            if existing is None and (not trigger_event_id or cohort_signature):
                 for candidate in db.execute('SELECT id,incident_json FROM incidents ORDER BY rowid DESC'):
                     saved = json.loads(candidate['incident_json'])
                     saved_signature = saved.get('cohort_signature') or {}
@@ -1369,15 +2772,41 @@ class RecoveryService:
                         cohort_signature and saved_signature
                         and saved_signature.get('handler_version') == cohort_signature.get('handler_version')
                         and saved_signature.get('config_version') == cohort_signature.get('config_version'))
-                    if (saved['trigger_user_id'] == user_id and saved['window_start'] == iso(start)
-                            and saved['window_end'] == iso(end) and saved['run_id'] == manifest['run_id']
-                            and signature_matches):
+                    same_exact_incident = (not trigger_event_id
+                        and saved['trigger_user_id'] == user_id
+                        and saved['window_start'] == iso(start)
+                        and saved['window_end'] == iso(end))
+                    same_live_cohort = bool(cohort_signature and signature_matches
+                        and saved['run_id'] == manifest['run_id']
+                        and parse_time(saved['window_start']) <= at
+                        < parse_time(saved['window_end']))
+                    if not (same_exact_incident or same_live_cohort):
+                        continue
+                    if same_live_cohort:
+                        closed = db.execute('SELECT status,updated_at,execution_job_id FROM automatic_recovery '
+                            'WHERE incident_id=? ORDER BY attempt DESC LIMIT 1',
+                            (candidate['id'],)).fetchone()
+                        if closed and closed['status'] in ('completed','unresolved'):
+                            continue
+                        incident_job = db.execute('SELECT 1 FROM jobs WHERE kind IN '
+                            "('incident','scan','automatic_recovery') AND payload LIKE ? "
+                            "AND status IN ('queued','running') LIMIT 1",
+                            ('%'+candidate['id']+'%',)).fetchone()
+                        execution_job = (None if not closed or not closed['execution_job_id'] else
+                            db.execute("SELECT 1 FROM jobs WHERE id=? AND status IN ('queued','running')",
+                                (closed['execution_job_id'],)).fetchone())
+                        decision_active = bool(closed and closed['status'] in (
+                            'queued','awaiting_execution','retry_scheduled'))
+                        if not incident_job and not execution_job and not decision_active:
+                            continue
+                    if saved['run_id'] == manifest['run_id']:
                         existing = candidate
                         break
             if trigger_event_id:
                 existing = db.execute('SELECT id,incident_json FROM incidents WHERE trigger_event_id=?', (trigger_event_id,)).fetchone() or existing
             if existing:
                 incident = json.loads(existing['incident_json'])
+                self._bind_fulfillment_claims(db,incident['id'],claims)
                 job = db.execute('SELECT id FROM jobs WHERE payload LIKE ? ORDER BY created_at DESC LIMIT 1',
                                  ('%'+incident['id']+'%',)).fetchone()
                 db.execute('COMMIT')
@@ -1387,6 +2816,7 @@ class RecoveryService:
                        (incident_id, trigger_event_id, _json(incident), now))
             db.execute('INSERT INTO jobs(id,kind,status,payload,created_at,updated_at) VALUES(?,?,?,?,?,?)',
                        (job_id, 'incident', 'queued', _json({'incident_id': incident_id}), now, now))
+            self._bind_fulfillment_claims(db,incident_id,claims)
             db.execute('COMMIT')
         except Exception:
             if db.in_transaction:
@@ -1599,6 +3029,7 @@ class RecoveryService:
             entitlement = entitlement_by_id[user_id]
             preconditions = {'projection_revision': account['projection_revision'],
                 'identity_revision': account['identity_revision'],
+                'provider_customer_id': account['provider_customer_id'],
                 'policy_revision': account['policy_revision'],
                 'profile_revision': profile['source_revision'],
                 'profile_hash': entitlement['entitlement_hash'],
@@ -1807,6 +3238,19 @@ class RecoveryService:
         if plan['app'] != self._manifest()['app'] or plan['environment'] != self._manifest()['environment'] or plan['run_id'] != self._manifest()['run_id']:
             raise RecoveryError('Plan scope changed', 409)
         if plan.get('recovery_basis') == 'adapty_entitlement_delivery':
+            # Plans persisted before the V2 identity/policy CAS cannot safely
+            # issue a new request. A started operation may only be read back
+            # using its immutable operation key; a fresh plan is required for
+            # any request whose original intent was never durably recorded.
+            legacy_entries = [entry for entry in plan.get('entries', [])
+                if entry.get('type') == 'resync_access'
+                and 'provider_customer_id' not in entry.get('preconditions', {})]
+            if legacy_entries:
+                existing = self._action_rows(plan['id'])
+                if any(not existing.get(entry['id']) or not existing[entry['id']].get('started_at')
+                       for entry in legacy_entries):
+                    raise RecoveryError('Legacy live plan requires a new preview before resync', 409)
+                return {'legacy_readback_only': True}
             observations = self._observations(fresh_live_ids=plan['ids'])
             incident = self._get_incident(plan['incident_id'])
             current = {row['id']: row for row in self._classify(observations, incident)}
@@ -1892,7 +3336,8 @@ class RecoveryService:
     def _remote_post(self, owner, endpoint, body, operation_key):
         base = self.provider_url if owner == 'adapty' else self.lumen_url
         try:
-            result = internal_request(self.key, base, 'POST', endpoint, body)
+            result = internal_request(self.key, base, 'POST', endpoint, body,
+                timeout=65 if self.live_config and owner == 'lumen' else 5)
             return result, None
         except Exception as exc:
             try:
@@ -1932,7 +3377,8 @@ class RecoveryService:
 
     def _profile(self, user_id):
         result = internal_request(self.key, self.provider_url, 'GET',
-                                  '/internal/adapty/profile?'+urlencode({'user': user_id}))
+                                  '/internal/adapty/profile?'+urlencode({'user': user_id}),
+                                  timeout=60 if self.live_config else 5)
         return result
 
     @staticmethod
@@ -2037,6 +3483,13 @@ class RecoveryService:
                 continue
             if plan.get('recovery_basis') == 'adapty_entitlement_delivery':
                 prior = self._existing_action(entry['id'])
+                if 'provider_customer_id' not in entry.get('preconditions', {}):
+                    result, status = self._operation_result(entry, plan_id, 'lumen',
+                        '/internal/lumen/resync', {}, allow_new=False)
+                    self._save_action(entry, plan_id, status, result=result,
+                        evidence_ref='adapty://entitlement/'+entry['account_id'])
+                    outcomes[entry['id']] = status
+                    continue
                 if prior and prior['started_at']:
                     result, status = self._operation_result(entry, plan_id, 'lumen',
                         '/internal/lumen/resync', {}, allow_new=False)
@@ -2063,12 +3516,22 @@ class RecoveryService:
                     outcomes[entry['id']] = 'blocked'
                     continue
                 body = {'user_id': user_id,
-                    'expected_revision': preconditions['projection_revision'],
+                    'schema_version': 2,
+                    'expected_provider_customer_id': preconditions['provider_customer_id'],
+                    'expected_identity_revision': preconditions['identity_revision'],
+                    'expected_policy_revision': preconditions['policy_revision'],
+                    'expected_projection_revision': preconditions['projection_revision'],
+                    'processing_id': 'processing-'+entry['id'],
+                    'trace_id': 'trace-'+entry['id'],
                     'entitlement': {'product_id': entitlement['product_id'],
                         'expires_at': entitlement['expires_at'],
                         'entitlement_hash': entitlement['entitlement_hash'],
                         'transaction_id': entitlement['transaction_id'],
-                        'source_fingerprint': entitlement['source_fingerprint']}}
+                        'source_fingerprint': entitlement['source_fingerprint'],
+                        **{key: entitlement[key] for key in
+                            ('original_transaction_id', 'store', 'source_environment')
+                            if entitlement.get(key)}},
+                    'operation_key': entry['id']}
                 result, status = self._operation_result(entry, plan_id, 'lumen',
                     '/internal/lumen/resync', body, allow_new=not resuming)
                 self._save_action(entry, plan_id, status, result=result,
@@ -2543,11 +4006,16 @@ class RecoveryService:
             public_incident['status'] = ('access_verified' if access_verified == len(targets) else
                 'partial_recovery' if access_verified else 'recovery_unresolved')
         fault = internal_request(self.key, self.lumen_url, 'GET', '/internal/lumen/live/status')
-        return {'mode': 'LIVE_ADAPTY_SEEDED',
+        provenance = manifest.get('provenance',recovery_live.PROVENANCE)
+        payment_verification = manifest.get('payment_verification',
+            recovery_live.PAYMENT_VERIFICATION)
+        mode = ('LOCAL_ADAPTY_FIXTURE' if provenance == 'synthetic_test_fixture'
+                else 'LIVE_ADAPTY_SEEDED')
+        return {'mode': mode,
             'manifest': {**manifest, 'logical_now': self.wall_now(), 'wall_now': self.wall_now(),
                          'time_basis': 'wall_clock_for_adapty_entitlements_and_lumen_access'},
-            'payment_verification': recovery_live.PAYMENT_VERIFICATION,
-            'provenance': recovery_live.PROVENANCE,
+            'payment_verification': payment_verification,
+            'provenance': provenance,
             'catalog': observations['catalog'] if observations else None,
             'cli_catalog': observations['catalog'] if observations else None,
             'incident': public_incident,
@@ -2562,8 +4030,8 @@ class RecoveryService:
                 'unresolved': max(0, len(targets)-access_verified),
                 'unresolved_ids': sorted(targets-accessible_ids),
                 'payment_verification': recovery_live.PAYMENT_VERIFICATION,
-                'root_cause_status': 'correlated_delivery_issue' if confirmed else 'not_assessed',
-                'root_cause_certainty': 'correlated' if confirmed else 'not_assessed',
+                'root_cause_status': 'fulfillment_mismatch_observed' if confirmed else 'not_assessed',
+                'root_cause_certainty': 'shared_cause_not_established' if confirmed else 'not_assessed',
                 'latest_plan_id': plans[-1]['id'] if plans else None},
             'accounts': accounts, 'coverage': coverage, 'actions': actions,
             'fault_status': fault,
@@ -2573,8 +4041,7 @@ class RecoveryService:
                 'created_at': plan['created_at'], 'expires_at': plan['expires_at']}
                 for plan in plans], 'jobs': jobs}
 
-    @staticmethod
-    def _live_entitlement_current(profile, entitlement, user_id, now):
+    def _live_entitlement_current(self, profile, entitlement, user_id, now):
         if not profile or not entitlement or profile.get('status') != 'active' or not profile.get('identity_match'):
             return False
         try:
@@ -2583,6 +4050,7 @@ class RecoveryService:
                 and entitlement.get('user_id') == user_id
                 and entitlement.get('provider_customer_id') == user_id
                 and entitlement.get('app_id') == recovery_live.APP_ID
+                and self._live_profile_scope_matches(profile,user_id)
                 and entitlement.get('is_in_grace_period') is False
                 and parse_time(entitlement['starts_at']) <= now < parse_time(entitlement['expires_at']))
         except (KeyError, RecoveryError, TypeError):
@@ -2696,12 +4164,11 @@ class RecoveryService:
                 user_id = _one(query, 'user')
                 if user_id not in self.live_config['customer_user_ids']:
                     raise RecoveryError('Unknown live account', 404)
-                recovery_live.refresh_profiles(self.db_path, self.live_config,
-                                               self.live_reader, [user_id])
-                try:
-                    return recovery_live.profile(self.db_path, user_id)
-                except recovery_live.LiveSourceError as exc:
-                    raise RecoveryError('Fresh Adapty profile read failed', exc.status) from exc
+                refreshed = recovery_live.refresh_profiles(self.db_path, self.live_config,
+                    self.live_reader, [user_id], include_profiles=True)
+                if refreshed.get('observed') != 1:
+                    raise RecoveryError('Fresh Adapty profile read is in source cooldown', 503)
+                return refreshed['items'][0]
             if path == '/internal/adapty/profiles':
                 return recovery_live.profiles(self.db_path, _one(query, 'cursor'), self._limit(query))
             if path == '/internal/adapty/catalog':
@@ -2825,6 +4292,22 @@ class RecoveryService:
             return self._service_manifest(self.db_path)
         if self.live_config and path == '/internal/lumen/live/status':
             return domain.lumen_live_fault_status(self.db_path)
+        if self.live_config and path == '/internal/lumen/handler/result':
+            processing_id = _one(query, 'processing_id')
+            if not processing_id:
+                raise RecoveryError('processing_id query is required')
+            result = domain.lumen_handler_result(self.db_path, processing_id)
+            if result is not None:
+                return result
+            result = domain.lumen_find_processing_result(self.db_path, processing_id)
+            return {'processing_id': processing_id, 'outcome': 'committed_readback',
+                    'result': result} if result is not None else {'processing_id':processing_id,'outcome':'unknown'}
+        if self.live_config and path == '/internal/lumen/handler/results':
+            try:
+                return domain.lumen_handler_results(self.db_path,
+                    _one(query,'cursor'),self._limit(query))
+            except ValueError as exc:
+                raise RecoveryError(str(exc)) from exc
         if path == '/internal/lumen/accounts':
             return domain.lumen_accounts(self.db_path, _one(query, 'cursor'), self._limit(query))
         if path == '/internal/lumen/access':
@@ -2843,47 +4326,167 @@ class RecoveryService:
 
     def _lumen_post(self, path, body):
         if path == '/internal/lumen/resync':
-            if not isinstance(body, dict) or set(body) != {'user_id','expected_revision','entitlement','operation_key'}:
+            legacy_fields = {'user_id','expected_revision','entitlement','operation_key'}
+            v2_fields = {'schema_version','user_id','expected_provider_customer_id',
+                'expected_identity_revision','expected_policy_revision',
+                'expected_projection_revision','entitlement','operation_key',
+                'processing_id','trace_id'}
+            version = body.get('schema_version', 1) if isinstance(body, dict) else None
+            if (version == 1 and set(body) != legacy_fields
+                    or version == 2 and (type(version) is not int or set(body) != v2_fields)
+                    or version not in (1, 2)):
                 raise RecoveryError('Resync fields do not match the contract')
+            if self.live_config and version != 2:
+                raise RecoveryError('Live resync requires contract version 2', 409)
             prior = domain.lumen_action(self.db_path, body['operation_key'])
             if prior and not self.live_config:
                 return domain.lumen_resync(self.db_path, body)
+            fault_mode = None
+            if self.live_config and self.live_bootstrap_pending and not prior:
+                fault_mode = domain.lumen_simulation_take_fault(self.db_path, body['user_id'])
+                if fault_mode in ('handler_precommit','db_precommit','permanent_handler'):
+                    raise RecoveryError('Lumen handler could not commit the projection', 503)
+                if fault_mode == 'cache_refresh_skipped':
+                    db = _conn(self.db_path)
+                    try:
+                        db.execute('UPDATE access SET stale_once=1 WHERE user_id=?', (body['user_id'],))
+                    finally:
+                        db.close()
             try:
-                profile = internal_request(self.key, self.provider_url, 'GET',
-                    '/internal/adapty/profile?'+urlencode({'user': body['user_id']}))
+                profile = self._profile(body['user_id'])
             except Exception as exc:
-                raise RecoveryError('Fresh Adapty profile read failed', 503) from exc
+                raise SourceReadUnavailable() from exc
             if self.live_config:
                 self._emit_source_observations([profile])
             expected = body['entitlement']
             source = (profile or {}).get('entitlement') or {}
+            if self.live_config:
+                supported_stores = ('app_store','play_store')
+                expected_environment = self.live_config.get('source_environment')
+                if (not profile or profile.get('app_id') != recovery_live.APP_ID
+                        or profile.get('user_id') != body['user_id']
+                        or source.get('app_id') != recovery_live.APP_ID
+                        or source.get('user_id') != body['user_id']
+                        or source.get('provider_customer_id') != body.get('expected_provider_customer_id')
+                        or source.get('source_environment') != expected_environment
+                        or source.get('store') not in supported_stores):
+                    raise RecoveryError('Fresh Adapty source scope mismatch',409)
+                if (expected.get('source_environment') != expected_environment
+                        or expected.get('store') not in supported_stores):
+                    raise RecoveryError('Requested entitlement outside source scope',409)
             if (not profile or profile.get('status') != 'active'
                     or (source if self.live_config else profile).get('product_id') != expected.get('product_id')
                     or (source if self.live_config else profile).get('expires_at') != expected.get('expires_at')
                     or (source if self.live_config else profile).get('transaction_id') != expected.get('transaction_id')
                     or (source if self.live_config else profile).get('entitlement_hash') != expected.get('entitlement_hash')
                     or self.live_config and (not profile.get('identity_match')
+                        or profile.get('provider_customer_id') != body.get('expected_provider_customer_id')
+                        or source.get('original_transaction_id') != expected.get('original_transaction_id')
+                        or source.get('store') != expected.get('store')
+                        or source.get('source_environment') != expected.get('source_environment')
                         or profile.get('source_fingerprint') != expected.get('source_fingerprint'))):
                 raise RecoveryError('Fresh Adapty profile does not match requested entitlement', 409)
+            if fault_mode == 'delayed_older_update':
+                time.sleep(0.1)
+                try:
+                    latest = self._profile(body['user_id'])
+                except Exception as exc:
+                    raise SourceReadUnavailable() from exc
+                if latest.get('source_fingerprint') != profile.get('source_fingerprint'):
+                    raise RecoveryError('Delayed source update is no longer current', 409)
             result = domain.lumen_resync(self.db_path, body)
-            if self.live_config and not result.get('duplicate'):
-                self._emit_projection_change(body['user_id'], result, body['operation_key'])
+            if self.live_config:
+                self._emit_projection_change(body['user_id'], result, body['operation_key'],
+                    occurred_at=result.get('processed_at'))
+                if fault_mode == 'timeout_after_commit':
+                    return result, True
             return result
-        if self.live_config and path == '/internal/lumen/source-observed':
+        if self.live_config and path in ('/internal/lumen/source-observed',
+                '/internal/lumen/handler/deliver'):
+            handler_delivery = path.endswith('/handler/deliver')
+            if handler_delivery and (not self.demo or not self.live_bootstrap_pending):
+                raise RecoveryError('Normal handler simulation is unavailable', 404)
             if not isinstance(body, dict) or set(body) != {'items'} or not isinstance(body['items'], list):
                 raise RecoveryError('Source observation fields do not match the contract')
             profiles = []
             for item in body['items']:
-                if (not isinstance(item, dict) or set(item) != {'user_id','source_fingerprint',
-                        'observed_at','starts_at','expires_at','reason'}
-                        or item['user_id'] not in self.live_config['customer_user_ids']):
+                optional = {'transaction_id','original_transaction_id','store',
+                    'source_environment','access_level','product_id','entitlement_hash',
+                    'processing_id'}
+                required = {'user_id','source_fingerprint','observed_at','starts_at','expires_at',
+                    'reason','status','identity_match','provider_customer_id'}
+                if (not isinstance(item, dict) or not required <= set(item)
+                        or set(item)-required-optional
+                        or item['user_id'] not in self.live_config['customer_user_ids']
+                        or item['status'] not in ('active','inactive','unknown')
+                        or type(item['identity_match']) is not bool
+                        or not isinstance(item['provider_customer_id'],str)
+                        or handler_delivery and (not isinstance(item.get('processing_id'),str)
+                            or not item['processing_id'])):
                     raise RecoveryError('Source observation fields do not match the contract')
+                entitlement = {'starts_at': item['starts_at'], 'expires_at': item['expires_at'],
+                    'source_fingerprint': item['source_fingerprint']}
+                for key in ('transaction_id','original_transaction_id','store',
+                            'source_environment','product_id','entitlement_hash'):
+                    if key in item:
+                        entitlement[key] = item[key]
+                if 'access_level' in item:
+                    entitlement['access_level_id'] = item['access_level']
                 profiles.append({'user_id': item['user_id'],
                     'source_fingerprint': item['source_fingerprint'],
                     'observed_at': item['observed_at'], 'reason': item['reason'],
-                    'entitlement': {'starts_at': item['starts_at'], 'expires_at': item['expires_at']}})
-            self._emit_source_observations(profiles)
-            return {'accepted': len(profiles)}
+                    'provider_customer_id': item['provider_customer_id'],
+                    'status': item['status'], 'identity_match': item['identity_match'],
+                    'entitlement': entitlement,
+                    **({'processing_id':item['processing_id']} if 'processing_id' in item else {})})
+            source_events = self._emit_source_observations(profiles)
+            if not handler_delivery:
+                return {'accepted':len(profiles),'telemetry_emitted':len(source_events),
+                    'handled':0,'failed':0,'writes':0}
+            db = _conn(self.db_path)
+            try:
+                paused = bool(_meta(db, 'live_handler_paused', False))
+            finally:
+                db.close()
+            handled = failed = diagnostics = 0
+            failure_classes = {}
+            if not paused:
+                for profile in profiles:
+                    source_event = source_events.get(profile['user_id'])
+                    result = self._handle_live_source_observation(profile, source_event,
+                        profile.get('processing_id'))
+                    if result.get('outcome') == 'completed':
+                        handled += 1
+                    elif result.get('outcome') == 'failed':
+                        failed += 1
+                        category = result.get('error_class') or result.get('reason') or 'other'
+                        if category not in ('recovery_http_400','recovery_http_404',
+                                'recovery_http_409','recovery_http_429','recovery_http_503',
+                                'recovery_http_504','internal_http_400','internal_http_404',
+                                'internal_http_409','internal_http_429','internal_http_503',
+                                'internal_http_504','ValueError','TypeError','KeyError',
+                                'TimeoutError','OperationalError',
+                                'handler_failure','cache_refresh_skipped','identity_unknown'):
+                            category = 'other'
+                        failure_classes[category] = failure_classes.get(category,0)+1
+                    else:
+                        diagnostics += 1
+            return {'accepted': len(profiles), 'handled': handled,
+                    'failed': failed, 'diagnostic_only': diagnostics,
+                    'failure_classes': failure_classes, 'paused': paused}
+        if self.live_config and path == '/internal/lumen/simulation/configure':
+            if not self.demo or not self.live_bootstrap_pending:
+                raise RecoveryError('Live simulation configuration is unavailable', 404)
+            if (not isinstance(body,dict) or set(body) not in (
+                    {'faults','paused'}, {'faults','paused','prepare_projection_loss'})
+                    or type(body['paused']) is not bool):
+                raise RecoveryError('Live simulation configuration fields do not match')
+            try:
+                return domain.lumen_simulation_configure(self.db_path, body['faults'],
+                    paused=body['paused'],
+                    prepare_projection_loss=body.get('prepare_projection_loss'))
+            except ValueError as exc:
+                raise RecoveryError(str(exc)) from exc
         if self.live_config and path == '/internal/lumen/live/inject':
             required = {'user_ids','handler_version','config_version','occurred_at'}
             if (not isinstance(body, dict) or set(body) - (required | {'fault_kind'})
@@ -2977,8 +4580,7 @@ class RecoveryService:
         if not self.sdk or not result or not result.get('before') or not result.get('after'):
             return None
         try:
-            return self.sdk.emit('access_projection_changed', user_id,
-                occurred_at or self.wall_now(), {
+            details = {
                     'action_id': action_id, 'source_hash': result.get('source_hash') or 'unknown',
                     'expected_revision': result['before']['projection_revision'],
                     'policy_version': result.get('policy_version', 'premium-policy-v1'),
@@ -2986,7 +4588,17 @@ class RecoveryService:
                     'projection_version': handler_version or result.get('projection_version', 'lumen-projection-v2'),
                     'cache_version': config_version or result.get('config_version', 'lumen-cache-v2'),
                     'outcome': 'projection_updated', 'before': result['before'],
-                    'after': result['after'], 'cache_invalidated': bool(result['after'].get('invalidated'))})
+                    'after': result['after'], 'cache_invalidated': bool(result['after'].get('invalidated'))}
+            if result.get('schema_version') == 2:
+                details.update(processing_id=result['processing_id'], trace_id=result['trace_id'],
+                    transaction_id=result['transaction_id'], steps=result['steps'],
+                    revisions=result['revisions'])
+                return self.sdk.emit('access_projection_changed', user_id,
+                    occurred_at or self.wall_now(), details, schema_version=2,
+                    event_id='processing:'+result['processing_id'],
+                    correlation_id=result['trace_id'], source_event_id=action_id)
+            return self.sdk.emit('access_projection_changed', user_id,
+                occurred_at or self.wall_now(), details)
         except Exception:
             return None
 
@@ -3012,7 +4624,12 @@ class RecoveryService:
             db.close()
         incident_status = json.loads(incident['incident_json'])['status'] if incident else None
         plan_status = latest_plan['status'] if latest_plan else None
-        return {'mode': 'LIVE_ADAPTY_SEEDED', 'scenario': 'live_adapty', 'ready': ready,
+        provenance=source.get('provenance') or self._manifest().get('provenance')
+        payment_verification=self._manifest().get('payment_verification',
+            recovery_live.PAYMENT_VERIFICATION)
+        mode=('LOCAL_ADAPTY_FIXTURE' if provenance == 'synthetic_test_fixture'
+            else 'LIVE_ADAPTY_SEEDED')
+        return {'mode': mode, 'scenario': 'live_adapty', 'ready': ready,
             'readiness': readiness, 'app_id': self._manifest()['app'],
             'app_title': self._manifest().get('app_title'),
             'environment': self._manifest()['environment'],
@@ -3021,8 +4638,12 @@ class RecoveryService:
             'account_count': source.get('account_count', 0),
             'active_count': source.get('active_count', 0),
             'source_observed_at': source.get('source_observed_at'),
+            'source_requests_total': source.get('source_requests_total', 0),
+            'last_source_request_at': source.get('last_source_request_at'),
+            'source_cooldown_seconds': source.get('source_cooldown_seconds', 0),
+            'last_source_pass': source.get('last_source_pass'),
             'provenance': source.get('provenance'),
-            'payment_verification': recovery_live.PAYMENT_VERIFICATION,
+            'payment_verification': payment_verification,
             'provider_evidence_count': 0,
             'cli_catalog': source.get('cli_catalog'),
             'catalog': source.get('cli_catalog'),
@@ -3049,9 +4670,13 @@ class RecoveryService:
             '/internal/live/refresh', {'user_ids': user_ids}, timeout=60)
         profiles = self._pages(self.provider_url, '/internal/adapty/profiles')
         self._notify_live_source_observations(profiles)
+        fulfillment = self._live_fulfillment_audit(refresh_source=False)
         status = self._live_status()
         return {'requested': result.get('requested', 0), 'observed': result.get('observed', 0),
                 'active': status['active_count'], 'source_observed_at': status['source_observed_at'],
+                'source_calls': result.get('source_calls', 0),
+                'source_pass_id': result.get('source_pass_id'),
+                'waiting_reason': result.get('waiting_reason') or fulfillment.get('waiting_reason'),
                 'ready': status['ready']}
 
     def _live_incident(self, body):
@@ -3061,7 +4686,11 @@ class RecoveryService:
         user_ids = [row['user_id'] for row in registry]
         refreshed = internal_request(self.key, self.provider_url, 'POST',
             '/internal/live/refresh', {'user_ids': user_ids}, timeout=60)
-        if refreshed.get('observed') != len(user_ids):
+        source_complete = refreshed.get('observed') == len(user_ids)
+        if (not source_complete and refreshed.get('waiting_reason') == 'source_poll_interval'
+                and self._has_fresh_complete_source_pass()):
+            source_complete = True
+        if not source_complete:
             raise RecoveryError('Live source refresh is incomplete', 503)
         refreshed_profiles = self._pages(self.provider_url, '/internal/adapty/profiles')
         self._notify_live_source_observations(refreshed_profiles)
@@ -3096,9 +4725,731 @@ class RecoveryService:
             'incident': {'id': None, 'job_id': None,
                          'pending': gate_status == 403 and bool(gate.get('event_id'))}}
 
+    def _live_simulation_control(self, body):
+        if isinstance(body,dict) and body.get('action') == 'configure':
+            if (set(body) != {'action','clock_scale'} or type(body['clock_scale']) is not int
+                    or not 1 <= body['clock_scale'] <= 1000):
+                raise RecoveryError('Simulation clock scale must be an integer from 1 to 1000')
+            db = _conn(self.db_path)
+            try:
+                db.execute('BEGIN IMMEDIATE')
+                if db.execute("SELECT 1 FROM simulations WHERE status='running' LIMIT 1").fetchone():
+                    raise RecoveryError('Stop simulation generation before changing its clock', 409)
+                _set_meta(db, 'demo_simulation_clock_scale', body['clock_scale'])
+                _set_meta(db, 'simulation_waiting_reason', None)
+                db.execute('COMMIT')
+            except Exception:
+                if db.in_transaction:
+                    db.execute('ROLLBACK')
+                raise
+            finally:
+                db.close()
+            self._fulfillment_wake.set()
+            return {'clock_scale': body['clock_scale'], 'demo_only': True}
+        if body == {'action':'stop'}:
+            with self._simulation_inject_lock:
+                db = _conn(self.db_path)
+                try:
+                    db.execute('BEGIN IMMEDIATE')
+                    row = db.execute("SELECT * FROM simulations WHERE status='running' "
+                        'ORDER BY created_at DESC,rowid DESC LIMIT 1').fetchone()
+                    if row is None:
+                        db.execute('COMMIT')
+                        return {'status':'idle','duplicate':False}
+                    db.execute('UPDATE simulations SET stop_requested=1,updated_at=? WHERE id=?',
+                               (self.wall_now(),row['id']))
+                    db.execute('COMMIT')
+                    return {'simulation_id':row['id'],'job_id':row['job_id'],
+                        'status':'running','duplicate':False,'stop_requested':True}
+                except Exception:
+                    if db.in_transaction:
+                        db.execute('ROLLBACK')
+                    raise
+                finally:
+                    db.close()
+        if isinstance(body,dict) and body.get('action') == 'resume':
+            if set(body) != {'action','simulation_id'} or not isinstance(body['simulation_id'],str):
+                raise RecoveryError('Simulation resume fields do not match')
+            simulation = self._simulation_row(body['simulation_id'])
+            sequence = json.loads(simulation['sequence_json'])
+            if (simulation['status'] not in ('stopped','failed') or not sequence
+                    or sequence[0].get('mode') not in ('bootstrap','continuous','cycle','batch')):
+                raise RecoveryError('Simulation is not resumable', 409)
+            job_id, now = 'job-'+uuid4().hex, self.wall_now()
+            db = _conn(self.db_path)
+            try:
+                db.execute('BEGIN IMMEDIATE')
+                if db.execute("SELECT 1 FROM simulations WHERE status='running' LIMIT 1").fetchone():
+                    raise RecoveryError('A simulation is already running', 409)
+                db.execute('UPDATE simulations SET status=\'running\',stop_requested=0,error=NULL,'
+                    'job_id=?,updated_at=? WHERE id=?',(job_id,now,simulation['id']))
+                db.execute('INSERT INTO jobs(id,kind,status,payload,created_at,updated_at) VALUES(?,?,?,?,?,?)',
+                    (job_id,'simulation','queued',_json({'simulation_id':simulation['id']}),now,now))
+                db.execute('COMMIT')
+            except Exception:
+                if db.in_transaction:
+                    db.execute('ROLLBACK')
+                raise
+            finally:
+                db.close()
+            self._set_simulation_waiting(None)
+            self._launch_job(job_id)
+            return {'simulation_id':simulation['id'],'job_id':job_id,
+                'status':'running','duplicate':False,'resumed':True}
+        if (not isinstance(body,dict) or body.get('action') not in ('bootstrap','once','start','continuous')
+                or set(body)-{'action','operation_key','fault_mode'}
+                or not isinstance(body.get('operation_key'),str)
+                or not body['operation_key'].strip() or len(body['operation_key'])>128):
+            raise RecoveryError('Simulation fields do not match the contract')
+        action = body['action']
+        fault_mode = body.get('fault_mode','random')
+        if action in ('once','start','continuous') and fault_mode not in (
+                'random','handler_precommit','db_precommit','cache_refresh_skipped','delayed_older_update',
+                'timeout_after_commit'):
+            raise RecoveryError('Unsupported simulation handler fault')
+        if action == 'bootstrap' and set(body) != {'action','operation_key'}:
+            raise RecoveryError('Bootstrap accepts only an operation key')
+        if action == 'once' and set(body)-{'action','operation_key','fault_mode'}:
+            raise RecoveryError('Simulation fields do not match the contract')
+        if action in ('start','continuous') and set(body)-{'action','operation_key','fault_mode'}:
+            raise RecoveryError('Simulation fields do not match the contract')
+        operation_key = body['operation_key'].strip()
+        mode = ('bootstrap' if action == 'bootstrap' else 'cycle' if action == 'once'
+                else 'batch' if action == 'start' else 'continuous')
+        step = {'mode':mode}
+        if mode != 'bootstrap':
+            step['fault_mode'] = fault_mode
+            step['seed'] = digest({'operation_key':operation_key})
+        sequence = [step]
+        total = 1 if action in ('bootstrap','once') else 3 if action == 'start' else 0
+        db = _conn(self.db_path)
+        try:
+            previous = db.execute('SELECT id,job_id,status FROM simulations WHERE operation_key=?',
+                                  (operation_key,)).fetchone()
+            if previous:
+                return {'simulation_id':previous['id'],'job_id':previous['job_id'],
+                    'status':previous['status'],'duplicate':True}
+            if db.execute("SELECT 1 FROM simulations WHERE status='running' LIMIT 1").fetchone():
+                raise RecoveryError('A simulation is already running',409)
+        finally:
+            db.close()
+        simulation_id, job_id, now = 'simulation-'+uuid4().hex, 'job-'+uuid4().hex, self.wall_now()
+        db = _conn(self.db_path)
+        try:
+            db.execute('BEGIN IMMEDIATE')
+            previous = db.execute('SELECT id,job_id,status FROM simulations WHERE operation_key=?',
+                                  (operation_key,)).fetchone()
+            if previous:
+                db.execute('COMMIT')
+                return {'simulation_id':previous['id'],'job_id':previous['job_id'],
+                    'status':previous['status'],'duplicate':True}
+            if db.execute("SELECT 1 FROM simulations WHERE status='running' LIMIT 1").fetchone():
+                raise RecoveryError('A simulation is already running',409)
+            db.execute('INSERT INTO simulations VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                (simulation_id,operation_key,'running',_json(sequence),0,total,0,0,None,None,
+                 job_id,now,now))
+            db.execute('INSERT INTO jobs(id,kind,status,payload,created_at,updated_at) VALUES(?,?,?,?,?,?)',
+                (job_id,'simulation','queued',_json({'simulation_id':simulation_id}),now,now))
+            db.execute('COMMIT')
+        except Exception:
+            if db.in_transaction:
+                db.execute('ROLLBACK')
+            raise
+        finally:
+            db.close()
+        self._set_simulation_waiting(None)
+        self._launch_job(job_id)
+        return {'simulation_id':simulation_id,'job_id':job_id,'status':'running',
+            'duplicate':False,'mode':mode}
+
+    def _live_open_incident_accounts(self, exclude_incident_id=None, *, include_verified=False):
+        db = _conn(self.db_path)
+        try:
+            open_ids = set()
+            for row in db.execute('SELECT incident_json FROM incidents ORDER BY created_at'):
+                incident = json.loads(row['incident_json'])
+                if incident['id'] == exclude_incident_id:
+                    continue
+                latest = db.execute('SELECT status,selected_ids,assessment_snapshot_id '
+                    'FROM automatic_recovery WHERE incident_id=? ORDER BY attempt DESC LIMIT 1',
+                    (incident['id'],)).fetchone()
+                candidates = set()
+                if incident.get('trigger_user_id'):
+                    candidates.add(incident['trigger_user_id'])
+                candidates.update(incident.get('confirmed_ids',[]))
+                snapshots = {incident.get('snapshot_id'),incident.get('first_snapshot_id')}
+                for decision in db.execute('SELECT selected_ids,assessment_snapshot_id '
+                        'FROM automatic_recovery WHERE incident_id=? ORDER BY attempt',
+                        (incident['id'],)):
+                    candidates.update(json.loads(decision['selected_ids']))
+                    snapshots.add(decision['assessment_snapshot_id'])
+                for snapshot_id in snapshots-{None}:
+                    snapshot = db.execute('SELECT snapshot_json FROM snapshots WHERE id=?',
+                        (snapshot_id,)).fetchone()
+                    if snapshot:
+                        data = json.loads(snapshot['snapshot_json'])
+                        candidates.update(item['id'] for item in data.get('accounts', [])
+                                          if item.get('status') == 'confirmed')
+                verification_status = {}
+                for plan_row in db.execute('SELECT plan_json FROM plans WHERE incident_id=? '
+                                           'ORDER BY created_at_wall,rowid', (incident['id'],)):
+                    plan = json.loads(plan_row['plan_json'])
+                    for entry in plan.get('entries', []):
+                        if entry.get('type') != 'verify_gate' or not entry.get('account_id'):
+                            continue
+                        verification_status[entry['account_id']] = False
+                        action = db.execute('SELECT status,result FROM actions WHERE id=?',
+                                            (entry['id'],)).fetchone()
+                        result = {} if action is None or not action['result'] else json.loads(action['result'])
+                        if (action and action['status'] == 'verified'
+                                and result.get('allowed') is True):
+                            verification_status[entry['account_id']] = True
+                verified = {user_id for user_id,allowed in verification_status.items() if allowed}
+                unresolved = candidates-verified
+                if not unresolved:
+                    continue
+                open_ids.update(candidates if include_verified else unresolved)
+            return open_ids
+        finally:
+            db.close()
+
+    def _live_simulation_wait_reason(self):
+        try:
+            source = internal_request(self.key,self.provider_url,'GET','/internal/live/status')
+        except Exception:
+            return 'source_status_unavailable'
+        if source.get('source_cooldown_seconds',0):
+            return 'source_cooldown'
+        try:
+            coverage = internal_request(self.key,self.lumen_url,'GET',
+                '/internal/lumen/collector-coverage')
+        except Exception:
+            return 'collector_status_unavailable'
+        if coverage.get('queued',0) >= 800:
+            return 'outbox_backpressure'
+        total = 0
+        for path in (self.db_path,Path(str(self.db_path)+'-wal')):
+            try:
+                total += path.stat().st_size
+            except OSError:
+                continue
+        if total >= 512*1024*1024:
+            return 'engine_storage_limit'
+        return None
+
+    def _live_source_request_total(self):
+        try:
+            status=internal_request(self.key,self.provider_url,'GET','/internal/live/status')
+            return int(status.get('source_requests_total',0))
+        except Exception:
+            return None
+
+    def _live_simulation_candidates(self, excluded):
+        observations = self._observations()
+        now = datetime.now(timezone.utc)
+        candidates = []
+        for user_id in observations['scope_ids']:
+            if user_id in excluded:
+                continue
+            profile = observations['profiles_by_id'].get(user_id)
+            entitlement = observations['entitlement_by_id'].get(user_id)
+            provider = observations['provider_by_id'].get(user_id)
+            client = observations['clients_by_id'].get(user_id)
+            if (self._live_entitlement_current(profile,entitlement,user_id,now)
+                    and provider and provider.get('identity_status') == 'mapped'
+                    and provider.get('provider_customer_id') == user_id
+                    and client and client.get('identity_status') == 'mapped'
+                    and client.get('provider_customer_id') == user_id
+                    and client.get('policy_enabled') and client.get('gate',{}).get('allowed') is True):
+                candidates.append(user_id)
+        return sorted(candidates)
+
+    def _save_simulation_intent(self, operation_key, simulation_id, cycle_no,
+                                user_id, fault_mode, processing_id, status='intent',
+                                result=None, incident_id=None):
+        now = self.wall_now()
+        db = _conn(self.db_path)
+        try:
+            db.execute('INSERT INTO simulation_intents(operation_key,simulation_id,cycle_no,user_id,'
+                'fault_mode,processing_id,status,incident_id,result_json,created_at,updated_at) '
+                'VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(operation_key) DO UPDATE SET '
+                'status=excluded.status,incident_id=COALESCE(excluded.incident_id,simulation_intents.incident_id),'
+                'result_json=COALESCE(excluded.result_json,simulation_intents.result_json),updated_at=excluded.updated_at',
+                (operation_key,simulation_id,cycle_no,user_id,fault_mode,processing_id,status,
+                 incident_id,None if result is None else _json(result),now,now))
+        finally:
+            db.close()
+
+    def _update_simulation_intent(self, operation_key, status, result=None, incident_id=None):
+        db = _conn(self.db_path)
+        try:
+            db.execute('UPDATE simulation_intents SET status=?,incident_id=COALESCE(?,incident_id),'
+                'result_json=COALESCE(?,result_json),updated_at=? WHERE operation_key=?',
+                (status,incident_id,None if result is None else _json(result),self.wall_now(),operation_key))
+        finally:
+            db.close()
+
+    def _live_handler_readback(self, processing_id):
+        return internal_request(self.key,self.lumen_url,'GET',
+            '/internal/lumen/handler/result?'+urlencode({'processing_id':processing_id}))
+
+    def _live_handler_result(self, simulation_id, operation_key, processing_id,
+                             user_id, fault_mode):
+        try:
+            readback = self._live_handler_readback(processing_id)
+        except Exception:
+            readback = {'outcome':'unknown'}
+        if readback.get('outcome') == 'unknown':
+            try:
+                profile = self._profile(user_id)
+            except Exception:
+                self._set_simulation_waiting('source_unavailable')
+                return None
+            if profile.get('status') != 'active' or not profile.get('entitlement',{}).get('transaction_id'):
+                self._update_simulation_intent(operation_key,'source_rejected',
+                    {'reason':'source_right_not_eligible'})
+                return {'outcome':'diagnostic_only','reason':'source_right_not_eligible'}
+            intent = self._simulation_intent(operation_key)
+            if intent and intent['status'] == 'intent':
+                fault = [] if fault_mode == 'normal' else [{'user_id':user_id,
+                    'fault_mode':fault_mode,'remaining_attempts':1,'permanent':False}]
+                internal_request(self.key,self.lumen_url,'POST','/internal/lumen/simulation/configure',
+                    {'faults':fault,'paused':False,
+                     'prepare_projection_loss':[] if fault_mode == 'normal' else [user_id]})
+                self._update_simulation_intent(operation_key,'fault_configured')
+            self._update_simulation_intent(operation_key,'request_sent')
+            handler_profile=profile
+            if fault_mode == 'delayed_older_update':
+                current=profile.get('entitlement') or {}
+                old_expiry=iso(parse_time(current['expires_at'])-timedelta(seconds=60))
+                old_fingerprint=digest({'previous':profile['source_fingerprint'],
+                    'expires_at':old_expiry,'simulation':'delayed_older_update'})
+                old_entitlement={**current,'expires_at':old_expiry,
+                    'entitlement_hash':digest({'user_id':user_id,
+                        'product_id':current['product_id'],'expires_at':old_expiry}),
+                    'source_fingerprint':old_fingerprint}
+                handler_profile={**profile,'source_fingerprint':old_fingerprint,
+                    'entitlement':old_entitlement}
+            try:
+                self._deliver_live_source_handlers([handler_profile],{user_id:processing_id})
+            except Exception:
+                pass
+            try:
+                readback = self._live_handler_readback(processing_id)
+            except Exception:
+                readback = {'outcome':'unknown'}
+        if readback.get('outcome') == 'committed_readback':
+            result = readback.get('result') or {}
+            result = {'user_id':user_id,'outcome':'completed','reason':'committed_readback',
+                'processing_id':processing_id,'trace_id':result.get('trace_id'),
+                'steps':result.get('steps',[]),'revisions':result.get('revisions',{})}
+        elif readback.get('outcome') in ('completed','failed','diagnostic_only'):
+            result = readback.get('result') or readback
+        else:
+            self._update_simulation_intent(operation_key,'unknown')
+            return None
+        state = 'handler_'+result.get('outcome','unknown')
+        self._update_simulation_intent(operation_key,state,result)
+        self._set_simulation_waiting(None)
+        return result
+
+    def _simulation_intent(self, operation_key):
+        db = _conn(self.db_path)
+        try:
+            row = db.execute('SELECT * FROM simulation_intents WHERE operation_key=?',
+                             (operation_key,)).fetchone()
+            return None if row is None else dict(row)
+        finally:
+            db.close()
+
+    def _wait_for_live_handler_incident(self, simulation_id, processing_id):
+        event_id = 'handler:'+processing_id
+        deadline = time.monotonic()+SIMULATION_RECOVERY_TIMEOUT
+        while time.monotonic() < deadline:
+            if self._simulation_row(simulation_id)['stop_requested']:
+                # Stop prevents another injected episode; current recovery is still monitored.
+                pass
+            db = _conn(self.db_path)
+            try:
+                assessment = db.execute('SELECT result FROM collector_assessments WHERE event_id=?',
+                                        (event_id,)).fetchone()
+                incident_id = None if assessment is None else json.loads(assessment['result']).get('incident_id')
+                decision = None if not incident_id else db.execute(
+                    'SELECT status FROM automatic_recovery WHERE incident_id=? ORDER BY attempt DESC LIMIT 1',
+                    (incident_id,)).fetchone()
+            finally:
+                db.close()
+            if incident_id and decision and decision['status'] in ('completed','unresolved'):
+                return incident_id,decision['status']
+            time.sleep(0.05)
+        raise RecoveryError('Timed out waiting for source-handler recovery',504)
+
+    def _wait_for_live_fulfillment_incident(self, simulation_id, incident_id):
+        deadline = time.monotonic()+SIMULATION_RECOVERY_TIMEOUT
+        while time.monotonic() < deadline:
+            db = _conn(self.db_path)
+            try:
+                decision = db.execute('SELECT status FROM automatic_recovery WHERE incident_id=? '
+                    'ORDER BY attempt DESC LIMIT 1',(incident_id,)).fetchone()
+                if decision and decision['status'] in ('completed','unresolved'):
+                    return decision['status']
+                jobs = [dict(row) for row in db.execute(
+                    "SELECT status,error,payload FROM jobs WHERE kind IN ('incident','scan','automatic_recovery') "
+                    "AND status='failed' ORDER BY created_at DESC LIMIT 20")]
+            finally:
+                db.close()
+            if any(json.loads(job['payload']).get('incident_id') == incident_id for job in jobs):
+                raise RecoveryError('Bootstrap fulfillment incident assessment failed',409)
+            time.sleep(0.05)
+        raise RecoveryError('Timed out waiting for bootstrap fulfillment recovery',504)
+
+    def _run_live_simulation(self, simulation_id, step):
+        if step['mode'] == 'bootstrap':
+            return self._run_live_bootstrap(simulation_id)
+        if step['mode'] == 'cycle':
+            outcome = self._run_live_simulation_cycle(simulation_id,step['fault_mode'])
+            if outcome is None:
+                self._finish_simulation(simulation_id,'stopped')
+                return {'simulation_id':simulation_id,'status':'stopped',
+                    'completed':self._simulation_row(simulation_id)['completed'],
+                    'total':self._simulation_row(simulation_id)['total']}
+            self._advance_simulation_cycle(simulation_id,outcome)
+            self._finish_simulation(simulation_id,'completed')
+            return {'simulation_id':simulation_id,'status':'completed',
+                'completed':self._simulation_row(simulation_id)['completed'],
+                'total':self._simulation_row(simulation_id)['total'],**outcome}
+        if step['mode'] == 'batch':
+            current = self._simulation_row(simulation_id)
+            for _ in range(max(0,current['total']-current['completed'])):
+                if self._simulation_row(simulation_id)['stop_requested']:
+                    break
+                outcome=self._run_live_simulation_cycle(simulation_id,step['fault_mode'])
+                if outcome is None:
+                    break
+                self._advance_simulation_cycle(simulation_id,outcome)
+                deadline=time.monotonic()+self._live_duration(10)
+                while time.monotonic()<deadline and not self._simulation_row(simulation_id)['stop_requested']:
+                    time.sleep(min(0.1,max(0,deadline-time.monotonic())))
+            current=self._simulation_row(simulation_id)
+            status='stopped' if current['stop_requested'] else 'completed'
+            self._finish_simulation(simulation_id,status)
+            return {'simulation_id':simulation_id,'status':status,
+                'completed':self._simulation_row(simulation_id)['completed'],
+                'total':self._simulation_row(simulation_id)['total']}
+        completed = 0
+        while not self._simulation_row(simulation_id)['stop_requested']:
+            reason = self._live_simulation_wait_reason()
+            if reason == 'engine_storage_limit':
+                self._set_simulation_waiting(reason)
+                self._finish_simulation(simulation_id,'stopped',reason)
+                return {'simulation_id':simulation_id,'status':'stopped','waiting_reason':reason,
+                    'completed':completed,'total':0}
+            if reason:
+                self._set_simulation_waiting(reason)
+                time.sleep(min(1,self._live_duration(1)))
+                continue
+            outcome = self._run_live_simulation_cycle(simulation_id,step['fault_mode'])
+            if outcome is None:
+                self._set_simulation_waiting('no_candidates')
+                time.sleep(min(1,self._live_duration(1)))
+                continue
+            self._advance_simulation_cycle(simulation_id,outcome)
+            completed += 1
+            self._set_simulation_waiting(None)
+            deadline = time.monotonic()+self._live_duration(10)
+            while time.monotonic()<deadline and not self._simulation_row(simulation_id)['stop_requested']:
+                time.sleep(min(0.1,max(0,deadline-time.monotonic())))
+        self._finish_simulation(simulation_id,'stopped')
+        return {'simulation_id':simulation_id,'status':'stopped','completed':
+            self._simulation_row(simulation_id)['completed'],'total':0}
+
+    def _advance_simulation_cycle(self,simulation_id,outcome):
+        db = _conn(self.db_path)
+        try:
+            db.execute('BEGIN IMMEDIATE')
+            intent = db.execute('SELECT operation_key,result_json FROM simulation_intents '
+                'WHERE simulation_id=? AND cycle_no=? ORDER BY created_at DESC LIMIT 1',
+                (simulation_id,outcome.get('cycle_no'))).fetchone()
+            if intent and intent['result_json']:
+                handler_result = json.loads(intent['result_json'])
+                cycle_result = {**handler_result, **outcome,
+                    'handler_outcome':outcome.get('handler_outcome',handler_result.get('outcome')),
+                    'handler_result':handler_result}
+                db.execute("UPDATE simulation_intents SET status='completed',result_json=?,updated_at=? "
+                    'WHERE operation_key=?',(_json(cycle_result),self.wall_now(),
+                        intent['operation_key']))
+            db.execute('UPDATE simulations SET current_index=current_index+1,completed=completed+1,'
+                'current_incident_id=?,updated_at=? WHERE id=?',
+                (outcome.get('incident_id'),self.wall_now(),simulation_id))
+            db.execute('COMMIT')
+        except Exception:
+            if db.in_transaction:
+                db.execute('ROLLBACK')
+            raise
+        finally:
+            db.close()
+
+    def _run_live_bootstrap(self,simulation_id):
+        source_calls_before=self._live_source_request_total()
+
+        def source_calls_since_start():
+            source_calls_after=self._live_source_request_total()
+            if source_calls_before is None or source_calls_after is None:
+                return None
+            return source_calls_after-source_calls_before
+
+        simulation = self._simulation_row(simulation_id)
+        if simulation['stop_requested']:
+            self._finish_simulation(simulation_id,'stopped')
+            return {'simulation_id':simulation_id,'status':'stopped','completed':0,'total':1,
+                'source_calls':source_calls_since_start()}
+        operation_key = simulation['operation_key']
+        registry = self._pages(self.provider_url,'/internal/provider/accounts')
+        user_ids = [item['user_id'] for item in registry]
+        if len(user_ids) != 100:
+            raise RecoveryError('Initial replay requires the configured 100-account source scope',409)
+        while True:
+            source = internal_request(self.key,self.provider_url,'GET','/internal/live/status')
+            if source.get('source_cooldown_seconds',0):
+                self._set_simulation_waiting('source_cooldown')
+                if self._simulation_row(simulation_id)['stop_requested']:
+                    self._finish_simulation(simulation_id,'stopped')
+                    return {'simulation_id':simulation_id,'status':'stopped','completed':0,'total':1,
+                        'source_calls':source_calls_since_start()}
+                time.sleep(min(1,max(0.1,source['source_cooldown_seconds'])))
+                continue
+            last_pass = source.get('last_source_pass') or {}
+            try:
+                pass_age = (datetime.now(timezone.utc)-parse_time(last_pass['completed_at'])).total_seconds()
+            except (KeyError,RecoveryError,TypeError):
+                pass_age = float('inf')
+            if (last_pass.get('requested') == 100 and last_pass.get('observed') == 100
+                    and not last_pass.get('waiting_reason') and 0 <= pass_age <= 300
+                    and source.get('observed_count') == 100):
+                break
+            result = internal_request(self.key,self.provider_url,'POST','/internal/live/refresh',
+                {'user_ids':user_ids},timeout=60)
+            if result.get('waiting_reason') in ('source_cooldown','source_poll_interval'):
+                self._set_simulation_waiting(result['waiting_reason'])
+                if result.get('not_before'):
+                    time.sleep(min(1,max(0.1,(parse_time(result['not_before'])-
+                        datetime.now(timezone.utc)).total_seconds())))
+                continue
+            if result.get('observed') != 100:
+                raise RecoveryError('Initial replay source pass is incomplete',503)
+            break
+        profiles = self._pages(self.provider_url,'/internal/adapty/profiles')
+        now = datetime.now(timezone.utc)
+        if len(profiles) != 100 or any(not self._fulfillment_source_right(
+                profile,profile.get('user_id'),now)[1]
+                or not (profile.get('entitlement') or {}).get('transaction_id')
+                for profile in profiles):
+            raise RecoveryError('Initial replay requires 100 current transaction-linked rights',409)
+        ordered = sorted(profiles,key=lambda item:item['user_id'])
+        transient = ordered[:23]
+        permanent = ordered[23]
+        processing_ids = {}
+        modes = {}
+        for profile in ordered:
+            user_id = profile['user_id']
+            processing_id = 'bootstrap:'+digest({'operation_key':operation_key,'user_id':user_id})
+            processing_ids[user_id] = processing_id
+            fault_mode = ('handler_precommit' if user_id in {item['user_id'] for item in transient}
+                          else 'permanent_handler' if user_id == permanent['user_id'] else 'normal')
+            modes[user_id] = fault_mode
+            intent_key = 'bootstrap:'+digest({'operation_key':operation_key,'user_id':user_id})
+            self._save_simulation_intent(intent_key,simulation_id,0,user_id,fault_mode,
+                                         processing_id,'request_sent')
+        faults = []
+        for profile in ordered:
+            user_id=profile['user_id']
+            if modes[user_id] == 'normal':
+                continue
+            processing_id=processing_ids[user_id]
+            try:
+                receipt=self._live_handler_readback(processing_id)
+            except Exception:
+                receipt={'outcome':'unknown'}
+            intent_key='bootstrap:'+digest({'operation_key':operation_key,'user_id':user_id})
+            operation_key_live='source-handler:'+digest({'user_id':user_id,
+                'processing_id':processing_id})
+            try:
+                action=internal_request(self.key,self.lumen_url,'GET',
+                    '/internal/lumen/action?'+urlencode({'operation_key':operation_key_live}))
+            except Exception:
+                action=None
+            if receipt.get('outcome') == 'unknown' and action is None:
+                faults.append({'user_id':user_id,'fault_mode':modes[user_id],
+                    'remaining_attempts':1,'permanent':modes[user_id] == 'permanent_handler'})
+            elif receipt.get('outcome') == 'unknown':
+                self._update_simulation_intent(intent_key,'action_committed')
+        internal_request(self.key,self.lumen_url,'POST','/internal/lumen/simulation/configure',
+            {'faults':faults,'paused':False})
+        self._set_scenario_meta('bootstrap_handler_batch_active',True)
+        if self._simulation_row(simulation_id)['stop_requested']:
+            self._finish_simulation(simulation_id,'stopped')
+            return {'simulation_id':simulation_id,'status':'stopped','completed':0,'total':1}
+        try:
+            replay = self._deliver_live_source_handlers(ordered,processing_ids)
+        except Exception:
+            replay = None
+        if replay and (replay.get('handled') != 76 or replay.get('failed') != 24):
+            raise RecoveryError('Initial source-handler replay count mismatch: accepted={} handled={} failed={} diagnostic_only={} failure_classes={}'.format(
+                replay.get('accepted',-1),replay.get('handled',-1),
+                replay.get('failed',-1),replay.get('diagnostic_only',-1),
+                json.dumps(replay.get('failure_classes',{}),sort_keys=True)),409)
+        processing_for_user = {}
+        handler_outcomes = {}
+        for profile in ordered:
+            user_id=profile['user_id']
+            processing_id=processing_ids[user_id]
+            intent_key='bootstrap:'+digest({'operation_key':operation_key,'user_id':user_id})
+            readback=self._live_handler_readback(processing_id)
+            if readback.get('outcome') == 'unknown':
+                # A crash between Lumen commit and its handler row is recovered from
+                # the durable action receipt or by idempotently replaying this event.
+                self._save_simulation_intent(intent_key,simulation_id,0,user_id,
+                    'normal',processing_id,'unknown')
+                self._deliver_live_source_handlers([profile],{user_id:processing_id})
+                readback=self._live_handler_readback(processing_id)
+            outcome=readback.get('result') or readback
+            processing_for_user[user_id]=processing_id
+            handler_outcomes[user_id]=outcome
+            self._update_simulation_intent(intent_key,'handler_'+str(outcome.get('outcome','unknown')),outcome)
+        self._set_simulation_waiting(None)
+        failed_users={user_id for user_id,result in handler_outcomes.items()
+            if result.get('outcome') == 'failed'}
+        if len(failed_users) != 24:
+            raise RecoveryError('Initial source-handler batch readback did not contain 24 failed results',409)
+        audit=self._live_fulfillment_audit(refresh_source=False,handler_batch_complete=True)
+        incident_id=audit.get('incident_id')
+        if not incident_id:
+            db=_conn(self.db_path)
+            try:
+                row=db.execute('SELECT incident_id FROM fulfillment_expectations '
+                    "WHERE status='discrepancy' AND episode_open=1 AND incident_id IS NOT NULL "
+                    'ORDER BY updated_at DESC LIMIT 1').fetchone()
+                incident_id=None if row is None else row['incident_id']
+            finally:
+                db.close()
+        self._set_scenario_meta('bootstrap_handler_batch_active',False)
+        if not incident_id:
+            raise RecoveryError('Initial source-handler batch did not produce a shared discrepancy incident',409)
+        automatic_status=self._wait_for_live_fulfillment_incident(simulation_id,incident_id)
+        self._live_fulfillment_audit(refresh_source=False)
+        state_by_key={}
+        db=_conn(self.db_path)
+        try:
+            for row in db.execute('SELECT key_json,source_fingerprint,status FROM fulfillment_expectations '
+                                  'ORDER BY updated_at DESC,expectation_id'):
+                key=json.loads(row['key_json'])
+                state_by_key.setdefault((key.get('customer_id'),key.get('transaction_id'),
+                    row['source_fingerprint']),row['status'])
+        finally:
+            db.close()
+        repaired=unresolved=0
+        for profile in ordered:
+            user_id=profile['user_id']
+            outcome=handler_outcomes[user_id]
+            intent_key='bootstrap:'+digest({'operation_key':operation_key,'user_id':user_id})
+            intent=self._simulation_intent(intent_key)
+            if user_id in failed_users:
+                entitlement=profile.get('entitlement') or {}
+                state=state_by_key.get((user_id,entitlement.get('transaction_id'),
+                    profile.get('source_fingerprint')))
+                if state == 'verified_application':
+                    repaired += 1
+                    status='handler_repaired'
+                else:
+                    unresolved += 1
+                    status='handler_unresolved'
+                self._update_simulation_intent(intent_key,status,outcome,incident_id)
+            elif intent:
+                self._update_simulation_intent(intent_key,intent['status'],
+                    None if not intent['result_json'] else json.loads(intent['result_json']))
+        if (replay is None or replay.get('accepted') != 100
+                or replay.get('handled') != 76 or replay.get('failed') != 24
+                or repaired != 23 or unresolved != 1
+                or automatic_status not in ('completed','unresolved')):
+            raise RecoveryError('Initial replay did not settle at 76 healthy, 23 repaired, 1 unresolved',409)
+        db=_conn(self.db_path)
+        try:
+            db.execute('UPDATE simulations SET current_index=1,completed=1,updated_at=? WHERE id=?',
+                (self.wall_now(),simulation_id))
+        finally:
+            db.close()
+        result={'simulation_id':simulation_id,'status':'completed','source_observed':100,
+            'handler_completed':76,'handler_failed':24,'repaired':23,'unresolved':1,
+            'customer_denials':0,'manual_incidents':0,
+            'source_calls':source_calls_since_start()}
+        self._finish_simulation(simulation_id,'completed')
+        return result
+
+    def _run_live_simulation_cycle(self,simulation_id,fault_mode):
+        if self._simulation_row(simulation_id)['stop_requested']:
+            return None
+        reason=self._live_simulation_wait_reason()
+        if reason:
+            self._set_simulation_waiting(reason)
+            return None
+        source_calls_before=self._live_source_request_total()
+        simulation=self._simulation_row(simulation_id)
+        cycle_no=simulation['completed']+1
+        operation_key='simcycle:'+digest({'simulation_id':simulation_id,'cycle_no':cycle_no})
+        intent=self._simulation_intent(operation_key)
+        if intent is None:
+            excluded=self._live_open_incident_accounts(include_verified=True)
+            candidates=self._live_simulation_candidates(excluded)
+            if not candidates:
+                self._set_simulation_waiting('no_candidates')
+                return None
+            if fault_mode == 'random':
+                step = json.loads(simulation['sequence_json'])[0]
+                generator = random.Random(str(step.get('seed') or simulation['operation_key'])+':'+str(cycle_no))
+                fault_mode = generator.choice(('handler_precommit','cache_refresh_skipped',
+                    'delayed_older_update','timeout_after_commit'))
+                user_id = generator.choice(candidates)
+            else:
+                user_id=candidates[(cycle_no-1)%len(candidates)]
+            processing_id='cycle:'+digest({'operation_key':operation_key,'user_id':user_id})
+            self._save_simulation_intent(operation_key,simulation_id,cycle_no,user_id,
+                fault_mode,processing_id,'intent')
+        else:
+            user_id,processing_id=intent['user_id'],intent['processing_id']
+            fault_mode=intent['fault_mode']
+            if intent['status'].startswith('handler_'):
+                outcome=json.loads(intent['result_json'] or '{}')
+            else:
+                with self._simulation_inject_lock:
+                    if self._simulation_row(simulation_id)['stop_requested']:
+                        return None
+                    outcome=self._live_handler_result(simulation_id,operation_key,processing_id,
+                        user_id,intent['fault_mode'])
+        if intent is None:
+            with self._simulation_inject_lock:
+                if self._simulation_row(simulation_id)['stop_requested']:
+                    return None
+                outcome=self._live_handler_result(simulation_id,operation_key,processing_id,
+                    user_id,fault_mode)
+        if outcome is None:
+            return None
+        incident_id,status=None,'no_recovery_needed'
+        if outcome.get('outcome') == 'failed':
+            incident_id,status=self._wait_for_live_handler_incident(simulation_id,processing_id)
+            self._update_simulation_intent(operation_key,'handler_'+status,outcome,incident_id)
+        self._set_simulation_waiting(None)
+        source_calls_after=self._live_source_request_total()
+        return {'cycle_no':cycle_no,'user_id':user_id,'fault_mode':fault_mode,
+            'handler_outcome':outcome.get('outcome'),'incident_id':incident_id,
+            'recovery_status':status,
+            'source_calls':None if source_calls_before is None or source_calls_after is None
+                else source_calls_after-source_calls_before}
+
     def _simulation(self, body):
         if not self.demo or not self.live_config or not self.auto_repair:
             raise RecoveryError('Simulation requires automatic live demo mode', 404)
+        if self.live_bootstrap_pending:
+            return self._live_simulation_control(body)
         if body == {'action': 'stop'}:
             with self._simulation_inject_lock:
                 db = _conn(self.db_path)
@@ -3191,6 +5542,9 @@ class RecoveryService:
     def _run_simulation(self, simulation_id):
         simulation = self._simulation_row(simulation_id)
         sequence = json.loads(simulation['sequence_json'])
+        if self.live_bootstrap_pending and sequence and sequence[0].get('mode') in (
+                'bootstrap','continuous','cycle','batch'):
+            return self._run_live_simulation(simulation_id, sequence[0])
         for index, step in enumerate(sequence):
             simulation = self._simulation_row(simulation_id)
             if simulation['stop_requested']:
@@ -3227,7 +5581,13 @@ class RecoveryService:
         user_ids = [row['user_id'] for row in registry]
         refreshed = internal_request(self.key, self.provider_url, 'POST', '/internal/live/refresh',
                                      {'user_ids': user_ids}, timeout=60)
-        if refreshed.get('observed') != len(user_ids):
+        if self._simulation_row(simulation_id)['stop_requested']:
+            return None
+        source_complete = refreshed.get('observed') == len(user_ids)
+        if (not source_complete and refreshed.get('waiting_reason') == 'source_poll_interval'
+                and self._has_fresh_complete_source_pass()):
+            source_complete = True
+        if not source_complete:
             raise RecoveryError('Live source refresh is incomplete', 503)
         profiles = self._pages(self.provider_url, '/internal/adapty/profiles')
         self._notify_live_source_observations(profiles)
@@ -3256,12 +5616,24 @@ class RecoveryService:
                 'user_ids': selected, 'handler_version': f'lumen-handler-{fault_kind}-{signature}',
                 'config_version': f'premium-export-{fault_kind}-{signature}',
                 'occurred_at': occurred_at, 'fault_kind': fault_kind})
-        if fault.get('account_count') != count:
-            raise RecoveryError('Simulation fault scope did not match the request', 502)
-        gate_status, gate = self._proxy_lumen_gate({'user_id': selected[0]})
-        if gate_status != 403 or not gate.get('event_id'):
-            raise RecoveryError('Simulation could not emit a customer denial event', 503)
-        return gate['event_id']
+            if fault.get('account_count') != count:
+                raise RecoveryError('Simulation fault scope did not match the request', 502)
+            gate_status, gate = self._proxy_lumen_gate({'user_id': selected[0]})
+            if gate_status != 403 or not gate.get('event_id'):
+                raise RecoveryError('Simulation could not emit a customer denial event', 503)
+            event_id = gate['event_id']
+            deadline = time.monotonic()+5
+            while time.monotonic() < deadline:
+                db = _conn(self.db_path)
+                try:
+                    received = db.execute('SELECT 1 FROM collector_events WHERE event_id=?',
+                                          (event_id,)).fetchone()
+                finally:
+                    db.close()
+                if received:
+                    break
+                time.sleep(0.01)
+            return event_id
 
     def _wait_for_automatic_recovery(self, simulation_id, event_id):
         deadline = time.monotonic()+SIMULATION_RECOVERY_TIMEOUT
@@ -3414,6 +5786,161 @@ class RecoveryService:
         with self._mutation_lock:
             return self._collect_locked(envelope, signature)
 
+    def _bootstrap_handler_batch_open(self, processing_id):
+        if not self.live_bootstrap_pending or not isinstance(processing_id,str):
+            return False
+        db = _conn(self.db_path)
+        try:
+            row = db.execute('SELECT s.status,s.sequence_json,i.cycle_no FROM simulation_intents i '
+                'JOIN simulations s ON s.id=i.simulation_id WHERE i.processing_id=?',
+                (processing_id,)).fetchone()
+            if row is None or row['cycle_no'] != 0 or row['status'] not in ('queued','running'):
+                return False
+            sequence = json.loads(row['sequence_json'])
+            return bool(sequence and sequence[0].get('mode') == 'bootstrap'
+                and _meta(db,'bootstrap_handler_batch_active',False))
+        finally:
+            db.close()
+
+    def _open_fulfillment_incident_for_handler(self, event):
+        details = event.get('details') or {}
+        user_id = event.get('app_user_id')
+        transaction_id = details.get('transaction_id')
+        source_fingerprint = details.get('source_hash')
+        if not isinstance(user_id,str) or not user_id:
+            return None
+        db = _conn(self.db_path)
+        try:
+            if (event.get('kind') == 'feature_access_decided'
+                    and details.get('decision') == 'deny'):
+                row = db.execute('SELECT incident_id,episode_open FROM fulfillment_expectations '
+                    "WHERE json_extract(key_json,'$.customer_id')=? "
+                    'ORDER BY first_observed_at DESC,version DESC LIMIT 1', (user_id,)).fetchone()
+                if row and row['episode_open'] and row['incident_id']:
+                    decision = db.execute('SELECT status FROM automatic_recovery '
+                        'WHERE incident_id=? ORDER BY attempt DESC LIMIT 1',
+                        (row['incident_id'],)).fetchone()
+                    if not decision or decision['status'] != 'completed':
+                        return row['incident_id']
+                return None
+            if not all(isinstance(value,str) and value for value in
+                       (transaction_id,source_fingerprint)):
+                return None
+            # Late receipts belong to the episode that finished after the event,
+            # even when the same source right has since entered another episode.
+            try:
+                event_time = parse_time(event.get('occurred_at'))
+            except RecoveryError:
+                event_time = None
+            if event_time is not None:
+                for row in db.execute('SELECT incident_id,trace_json FROM fulfillment_traces '
+                        'WHERE user_id=? AND incident_id IS NOT NULL ORDER BY updated_at,trace_id',
+                        (user_id,)):
+                    trace = json.loads(row['trace_json'])
+                    if (trace.get('source_fingerprint') == source_fingerprint
+                            and trace.get('transaction_id') == transaction_id
+                            and trace.get('status') == 'verified_application'
+                            and event_time <= parse_time(trace['created_at'])):
+                        return row['incident_id']
+            rows = db.execute('SELECT key_json,incident_id,episode_open FROM fulfillment_expectations '
+                'WHERE source_fingerprint=? AND incident_id IS NOT NULL ORDER BY episode_no DESC',
+                (source_fingerprint,)).fetchall()
+            for row in rows:
+                key = json.loads(row['key_json'])
+                if key.get('customer_id') != user_id or key.get('transaction_id') != transaction_id:
+                    continue
+                if row['episode_open']:
+                    decision = db.execute('SELECT status FROM automatic_recovery '
+                        'WHERE incident_id=? ORDER BY attempt DESC LIMIT 1',
+                        (row['incident_id'],)).fetchone()
+                    if decision and decision['status'] == 'completed':
+                        continue
+                    return row['incident_id']
+            return None
+        finally:
+            db.close()
+
+    def _bind_handler_receipts_to_incident(self, incident_id, expectations):
+        db = _conn(self.db_path)
+        try:
+            db.execute('BEGIN IMMEDIATE')
+            for item in expectations:
+                row = db.execute('SELECT key_json,source_fingerprint,incident_id FROM fulfillment_expectations '
+                    'WHERE expectation_id=? AND episode_no=?',
+                    (item['expectation_id'],item['episode_no'])).fetchone()
+                if row is None or row['incident_id'] != incident_id:
+                    continue
+                key = json.loads(row['key_json'])
+                if not key.get('transaction_id') or not row['source_fingerprint']:
+                    continue
+                events = db.execute('SELECT event_id FROM fulfillment_receipts WHERE user_id=? '
+                    'AND transaction_id=? AND source_fingerprint=?',
+                    (key.get('customer_id'),key['transaction_id'],row['source_fingerprint'])).fetchall()
+                db.execute('UPDATE fulfillment_receipts SET incident_id=? WHERE user_id=? '
+                    'AND transaction_id=? AND source_fingerprint=? AND incident_id IS NULL',
+                    (incident_id,key.get('customer_id'),key['transaction_id'],row['source_fingerprint']))
+                for event in events:
+                    assessment = db.execute('SELECT result FROM collector_assessments WHERE event_id=?',
+                        (event['event_id'],)).fetchone()
+                    if assessment:
+                        result = json.loads(assessment['result'])
+                        if not result.get('incident_id'):
+                            result.update(incident_id=incident_id,job_id=None)
+                            db.execute('UPDATE collector_assessments SET result=? WHERE event_id=?',
+                                (_json(result),event['event_id']))
+            db.execute('COMMIT')
+        except Exception:
+            if db.in_transaction:
+                db.execute('ROLLBACK')
+            raise
+        finally:
+            db.close()
+
+    def _live_denial_cohort_signature(self, pending):
+        users = {item.get('user_id') for item in pending if item.get('user_id')}
+        if not users:
+            return None
+        db = _conn(self.db_path)
+        try:
+            rows = db.execute('SELECT event_json FROM collector_events '
+                'ORDER BY recorded_at DESC,rowid DESC LIMIT 500').fetchall()
+        finally:
+            db.close()
+        now = datetime.now(timezone.utc)
+        for row in rows:
+            event = json.loads(row['event_json'])
+            if (event.get('app_user_id') not in users
+                    or event.get('kind') != 'feature_access_decided'):
+                continue
+            details = event.get('details') or {}
+            if (details.get('decision') != 'deny'
+                    or not isinstance(details.get('projection_version'),str)
+                    or not isinstance(details.get('cache_version'),str)):
+                continue
+            try:
+                if (now-parse_time(event['occurred_at'])).total_seconds() > 300:
+                    continue
+            except (KeyError,RecoveryError,TypeError):
+                continue
+            db = _conn(self.db_path)
+            try:
+                assessment = db.execute('SELECT result FROM collector_assessments '
+                    'WHERE event_id=?',(event['event_id'],)).fetchone()
+                incident_id = (None if assessment is None else
+                    json.loads(assessment['result']).get('incident_id'))
+                decision = None if not incident_id else db.execute(
+                    'SELECT status FROM automatic_recovery WHERE incident_id=? '
+                    'ORDER BY attempt DESC LIMIT 1',(incident_id,)).fetchone()
+            finally:
+                db.close()
+            if decision and decision['status'] == 'completed':
+                continue
+            return {'handler_version':details['projection_version'],
+                'config_version':details['cache_version'],
+                'occurred_at':event['occurred_at'],
+                'trigger_event_id':event['event_id']}
+        return None
+
     def _collect_locked(self, envelope, signature):
         from recovery_sdk import validate_event
         if not isinstance(envelope, dict) or set(envelope) != {'schema_version','event','sent_at'}:
@@ -3425,7 +5952,10 @@ class RecoveryService:
         if not isinstance(signature, str) or not hmac.compare_digest(expected, signature):
             raise RecoveryError('Invalid collector signature', 401)
         manifest = self._manifest()
-        if type(envelope['schema_version']) is not int or envelope['schema_version'] != 1:
+        if (type(envelope['schema_version']) is not int or envelope['schema_version'] not in (1, 2)
+                or not isinstance(envelope['event'], dict)
+                or type(envelope['event'].get('schema_version')) is not int
+                or envelope['schema_version'] != envelope['event']['schema_version']):
             raise RecoveryError('Unsupported collector schema version')
         event = envelope['event']
         try:
@@ -3444,13 +5974,36 @@ class RecoveryService:
             if prior:
                 if prior['payload_hash'] != event_hash:
                     raise RecoveryError('Collector event ID has another payload', 409)
-                db.execute('COMMIT')
                 duplicate = True
             else:
                 db.execute('INSERT INTO collector_events VALUES(?,?,?,?,?)',
                            (event['event_id'], event_hash, _json(event), self.wall_now(), 'client_simulator'))
-                db.execute('COMMIT')
                 duplicate = False
+            if (event['schema_version'] == 2 and event['kind'] == 'access_projection_changed'
+                    and event['details'].get('transaction_id')
+                    and event['details'].get('source_hash')
+                    and event['details'].get('trace_id')
+                    and isinstance(event['details'].get('steps'), list)):
+                details = event['details']
+                action_id = details.get('action_id')
+                action = (None if not action_id else db.execute(
+                    'SELECT p.incident_id FROM actions a JOIN plans p ON p.id=a.plan_id WHERE a.id=?',
+                    (action_id,)).fetchone())
+                db.execute('INSERT OR IGNORE INTO fulfillment_receipts VALUES(?,?,?,?,?,?,?,?,?)',
+                    (event['event_id'], event['app_user_id'], details['transaction_id'],
+                     details['source_hash'], details['trace_id'], action_id,
+                     None if action is None else action['incident_id'],
+                     _json(details['steps']), self.wall_now()))
+            elif (event['schema_version'] == 2 and event['kind'] == 'handler_completed'
+                    and event['details'].get('transaction_id')
+                    and event['details'].get('processing_id')
+                    and isinstance(event['details'].get('steps'), list)):
+                details = event['details']
+                db.execute('INSERT OR IGNORE INTO fulfillment_receipts VALUES(?,?,?,?,?,?,?,?,?)',
+                    (event['event_id'],event['app_user_id'],details['transaction_id'],
+                     details['source_hash'],details['trace_id'],None,None,
+                     _json(details['steps']),self.wall_now()))
+            db.execute('COMMIT')
         except Exception:
             if db.in_transaction:
                 db.execute('ROLLBACK')
@@ -3467,6 +6020,14 @@ class RecoveryService:
         customer_event = (event['kind'] == 'mobile_observation' or
                           (event['kind'] == 'feature_access_decided'
                            and event['details'].get('initiator') == 'customer_demo'))
+        live_handler_failure = bool(manifest.get('scenario') == 'live_adapty'
+            and event['schema_version'] == 2 and event['kind'] == 'handler_completed'
+            and event['details'].get('outcome') == 'failed')
+        live_handler_receipt = bool(manifest.get('scenario') == 'live_adapty'
+            and event['schema_version'] == 2 and event['kind'] == 'handler_completed'
+            and event['details'].get('processing_id')
+            and event['details'].get('transaction_id')
+            and event['details'].get('source_hash'))
         if not assessed and customer_event:
             live_denial_only = manifest.get('scenario') == 'live_adapty'
             should_scan = (not live_denial_only
@@ -3478,7 +6039,10 @@ class RecoveryService:
                     'SELECT incident_json FROM incidents ORDER BY created_at DESC,rowid DESC')]
                 live_signature = {'handler_version': event['details'].get('projection_version'),
                                   'config_version': event['details'].get('cache_version')}
-                matching = next((item for item in candidates
+                owned_id = (self._open_fulfillment_incident_for_handler(event)
+                            if live_denial_only and should_scan else None)
+                matching = next((item for item in candidates if item['id'] == owned_id), None)
+                matching = matching or next((item for item in candidates
                     if parse_time(item['window_start']) <= at < parse_time(item['window_end'])
                     and (not live_denial_only or (
                         (item.get('cohort_signature') or {}).get('handler_version') == live_signature['handler_version']
@@ -3495,7 +6059,8 @@ class RecoveryService:
                 db.close()
             if matching and should_scan:
                 incident_id = matching['id']
-                job_id = pending['id'] if pending else self._start_scan(incident_id)
+                job_id = (pending['id'] if pending else None) if owned_id else (
+                    pending['id'] if pending else self._start_scan(incident_id))
             elif (should_scan and (event['details'].get('decision') == 'deny'
                   or event['details'].get('observation_kind') in ('access_denied', 'purchase_succeeded'))):
                 cohort_signature = None
@@ -3505,16 +6070,52 @@ class RecoveryService:
                         'occurred_at': event['occurred_at'], 'trigger_event_id': event['event_id']}
                 incident_id, job_id = self._start_incident(event['app_user_id'], event['occurred_at'],
                     trigger_event_id=event['event_id'], cohort_signature=cohort_signature)
+        elif not assessed and live_handler_failure:
+            if self._bootstrap_handler_batch_open(event['details'].get('processing_id')):
+                incident_id, job_id = None, None
+            else:
+                incident_id = self._open_fulfillment_incident_for_handler(event)
+                if incident_id is None:
+                    incident_id, job_id = self._start_incident(event['app_user_id'],
+                        event['occurred_at'], trigger_event_id=event['event_id'])
+        if (live_handler_receipt and not assessed and not incident_id and not self._bootstrap_handler_batch_open(
+                event['details'].get('processing_id'))):
+            incident_id = self._open_fulfillment_incident_for_handler(event)
         if assessed:
             decision = json.loads(assessed['result'])
-            incident_id, job_id = decision['incident_id'], decision['job_id']
+            incident_id = decision.get('incident_id') or incident_id
+            job_id = job_id or decision.get('job_id')
         else:
             db = _conn(self.db_path)
             try:
+                if incident_id and live_handler_failure:
+                    db.execute('UPDATE fulfillment_receipts SET incident_id=? WHERE event_id=? AND incident_id IS NULL',
+                               (incident_id,event['event_id']))
                 db.execute('INSERT OR IGNORE INTO collector_assessments VALUES(?,?)',
                            (event['event_id'], _json({'incident_id': incident_id, 'job_id': job_id})))
             finally:
                 db.close()
+        if live_handler_receipt and incident_id:
+            db = _conn(self.db_path)
+            try:
+                db.execute('UPDATE fulfillment_receipts SET incident_id=? WHERE event_id=? AND incident_id IS NULL',
+                    (incident_id,event['event_id']))
+                assessment = db.execute('SELECT result FROM collector_assessments WHERE event_id=?',
+                    (event['event_id'],)).fetchone()
+                if assessment:
+                    result = json.loads(assessment['result'])
+                    if not result.get('incident_id'):
+                        result.update(incident_id=incident_id,job_id=job_id)
+                        db.execute('UPDATE collector_assessments SET result=? WHERE event_id=?',
+                            (_json(result),event['event_id']))
+            finally:
+                db.close()
+        if (manifest.get('scenario') == 'live_adapty' and event['kind'] in
+                ('source_entitlement_observed', 'handler_completed',
+                 'access_projection_changed', 'mobile_observation')):
+            self._fulfillment_wake.set()
+        if job_id:
+            self._launch_job(job_id)
         return {'accepted': True, 'duplicate': duplicate,
                 'event_id': event['event_id'], 'event_hash': event_hash,
                 **({'incident_id': incident_id, 'job_id': job_id} if incident_id else {})}
@@ -3522,15 +6123,24 @@ class RecoveryService:
     def _mobile_observation(self, body):
         from recovery_sdk import validate_event
         required = {'event_id', 'user_id', 'kind', 'occurred_at', 'details'}
-        if not isinstance(body, dict) or set(body) != required or not isinstance(body['details'], dict):
+        version = body.get('schema_version', 1) if isinstance(body, dict) else None
+        if (not isinstance(body, dict)
+                or (version == 1 and set(body) != required)
+                or (version == 2 and (type(version) is not int or set(body) != required | {'schema_version'}))
+                or version not in (1, 2) or not isinstance(body['details'], dict)):
             raise RecoveryError('Mobile event fields do not match the contract')
-        detail_keys = {'transaction_id', 'product_id', 'price_id', 'feature', 'reason_code'}
+        detail_keys = {'transaction_id', 'original_transaction_id', 'product_id', 'price_id',
+            'feature', 'reason_code', 'processing_id', 'trace_id', 'steps', 'revisions', 'stack'}
         if set(body['details']) - detail_keys:
             raise RecoveryError('Only allowlisted mobile metadata is accepted')
-        details = {'observation_kind': body['kind'], **{key: body['details'].get(key) for key in detail_keys}}
+        details = {'observation_kind': body['kind'], **{key: body['details'].get(key)
+            for key in ('transaction_id', 'product_id', 'price_id', 'feature', 'reason_code')}}
+        for key in ('original_transaction_id', 'processing_id', 'trace_id', 'steps', 'revisions', 'stack'):
+            if key in body['details']:
+                details[key] = body['details'][key]
         manifest = self._manifest()
         event_id = 'mobile:'+str(body['event_id'])
-        event = {'schema_version': 1, 'event_id': event_id, 'run_id': manifest['run_id'],
+        event = {'schema_version': version, 'event_id': event_id, 'run_id': manifest['run_id'],
                  'app': manifest['app'], 'environment': manifest['environment'],
                  'app_user_id': body['user_id'], 'kind': 'mobile_observation',
                  'occurred_at': body['occurred_at'], 'correlation_id': event_id,
@@ -3539,7 +6149,8 @@ class RecoveryService:
         result = domain.mobile_event(self.db_path, body)
         # Stable event identity makes replay safe after a crash between these two stores.
         receipt = self.sdk.emit('mobile_observation', body['user_id'], body['occurred_at'], details,
-                                event_id=event_id, correlation_id=event_id, source_event_id=body['event_id'])
+                                event_id=event_id, correlation_id=event_id, source_event_id=body['event_id'],
+                                schema_version=version)
         return {**result, 'telemetry_queued': receipt.get('queued', False)}
 
     def _proxy_lumen_gate(self, body):
@@ -3663,9 +6274,46 @@ class RecoveryHandler(_legacy.Handler):
             if self.service.role != 'engine':
                 return self.respond({'error':'not found'}, 404)
             if path == '/api/recovery/monitor':
-                return self.respond(recovery_monitor.build(self.service))
+                if set(query)-{'cursor','limit','status'}:
+                    raise RecoveryError('Unknown monitor query field')
+                limit = _one(query, 'limit')
+                try:
+                    limit = None if limit is None else int(limit)
+                except ValueError as exc:
+                    raise RecoveryError('Invalid monitor limit') from exc
+                return self.respond(recovery_monitor.build(self.service,
+                    cursor=_one(query,'cursor'), limit=limit, status=_one(query,'status')))
+            if path == '/api/recovery/fulfillments':
+                if set(query)-{'cursor','limit','status'}:
+                    raise RecoveryError('Unknown fulfillment query field')
+                limit = _one(query,'limit','50')
+                try:
+                    limit = int(limit)
+                except ValueError as exc:
+                    raise RecoveryError('Invalid fulfillment limit') from exc
+                return self.respond(self.service._fulfillments(
+                    _one(query,'cursor'), limit, _one(query,'status')))
+            if path.startswith('/api/recovery/incidents/') and path.endswith('/trace'):
+                incident_id = unquote(path[len('/api/recovery/incidents/'):-len('/trace')].rstrip('/'))
+                if not incident_id or query:
+                    raise RecoveryError('Trace path or query is invalid')
+                return self.respond(self.service._fulfillment_trace(incident_id))
+            if path == '/api/recovery/export':
+                if set(query)-{'from','to','format'}:
+                    raise RecoveryError('Unknown export query field')
+                export_format = _one(query,'format','json')
+                exported = self.service._export_recovery(_one(query,'from'),
+                    _one(query,'to'), export_format)
+                if export_format == 'csv':
+                    return self.respond(exported, ctype='text/csv; charset=utf-8',
+                        extra_headers={'Content-Disposition':'attachment; filename="recovery-export.csv"'})
+                return self.respond(exported)
             if path == '/api/recovery/live/status':
                 return self.respond(self.service._live_status())
+            if path == '/api/recovery/simulation':
+                if query:
+                    raise RecoveryError('Simulation status does not accept query fields')
+                return self.respond(self.service._simulation_summary())
             if path == '/api/recovery/report':
                 return self.respond(self.service._report(_one(query, 'incident_id')))
             if path == '/api/recovery/audit':
@@ -3783,7 +6431,8 @@ class RecoveryHandler(_legacy.Handler):
             result = self.service._live_incident(body)
             return self.respond(result, 202 if result['incident']['pending'] else 200)
         if path == '/api/recovery/simulation':
-            return self.respond(self.service._simulation(body), 202 if body.get('action') in ('once', 'start') else 200)
+            return self.respond(self.service._simulation(body), 202 if body.get('action') in
+                ('once','start','continuous','bootstrap','resume') else 200)
         if path == '/api/recovery/demo':
             return self.respond(self.service._demo(body))
         if path in ('/api/recovery/lumen/export','/lumen/export'):
@@ -3832,6 +6481,7 @@ def main(argv=None):
     parser.add_argument('--demo', action='store_true')
     parser.add_argument('--live-config', type=Path)
     parser.add_argument('--auto-repair', action='store_true')
+    parser.add_argument('--live-bootstrap-pending', action='store_true')
     args = parser.parse_args(argv)
     if not 0 <= args.port <= 65535:
         parser.error('--port must be between 0 and 65535')
@@ -3839,7 +6489,8 @@ def main(argv=None):
                               provider_url=args.provider_url, lumen_url=args.lumen_url,
                               collector_url=args.collector_url, demo=args.demo,
                               live_config=args.live_config,
-                              auto_repair=args.auto_repair)
+                              auto_repair=args.auto_repair,
+                              live_bootstrap_pending=args.live_bootstrap_pending)
     server = RecoveryHTTPServer(service)
     service.server = server
     print(json.dumps({'port': server.server_port, 'role': args.role}, separators=(',', ':')),
@@ -3849,6 +6500,8 @@ def main(argv=None):
     except KeyboardInterrupt:
         pass
     finally:
+        service._fulfillment_stop.set()
+        service._fulfillment_wake.set()
         server.shutdown()
         server.server_close()
 

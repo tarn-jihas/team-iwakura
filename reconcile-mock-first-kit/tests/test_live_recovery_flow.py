@@ -87,7 +87,7 @@ class FakeAdaptySource:
 
 
 class LiveHarness:
-    def __init__(self, root):
+    def __init__(self, root, *, pending=False):
         self.root = root
         self.config_path, self.users = live_config(root)
         self.source = FakeAdaptySource()
@@ -99,13 +99,15 @@ class LiveHarness:
             self.lumen = service.RecoveryService('lumen', 0, root/'lumen.db',
                 self.provider.key_file, provider_url='http://127.0.0.1:1',
                 collector_url='http://127.0.0.1:3/api/recovery/collector',
-                demo=True, live_config=self.config_path)
+                demo=True, live_config=self.config_path,
+                live_bootstrap_pending=pending)
         self.lumen.sdk = Mock()
         self.lumen.sdk.coverage.return_value = {'queued': 0, 'dropped': 0}
         with patch.object(service.RecoveryService, '_init_legacy'):
             self.engine = service.RecoveryService('engine', 0, root/'engine.db',
                 self.provider.key_file, provider_url='http://127.0.0.1:1',
-                lumen_url='http://127.0.0.1:2', demo=True, live_config=self.config_path)
+                lumen_url='http://127.0.0.1:2', demo=True, live_config=self.config_path,
+                live_bootstrap_pending=pending)
         self.engine._launch_job = Mock()
 
     def make_provider(self):
@@ -125,9 +127,25 @@ class LiveHarness:
         return result[0] if isinstance(result, tuple) else result
 
     def close(self):
+        self.engine._fulfillment_stop.set()
+        self.engine._fulfillment_wake.set()
+        if self.engine._fulfillment_thread:
+            self.engine._fulfillment_thread.join(timeout=5)
+            if self.engine._fulfillment_thread.is_alive():
+                raise RuntimeError('Fulfillment watcher did not stop before fixture cleanup')
         self.transport.stop()
 
     def inject_and_scan(self):
+        # Seed the ordinary-processing baseline before exercising this legacy
+        # customer-denial test path. New source rights are protected by the
+        # normal-processing grace in live classification.
+        self.engine._live_fulfillment_audit(refresh_source=True)
+        db = domain.connect(self.engine.db_path)
+        try:
+            old = timestamp(datetime.now(timezone.utc)-timedelta(minutes=1))
+            db.execute('UPDATE fulfillment_expectations SET first_observed_at=?', (old,))
+        finally:
+            db.close()
         occurred_at = service.iso(datetime.now(timezone.utc))
         self.lumen._lumen_post('/internal/lumen/live/inject', {
             'user_ids': self.users[:24], 'handler_version': 'test-handler-v1',
@@ -208,10 +226,15 @@ class LiveRecoveryFlowTests(unittest.TestCase):
         entitlement = next(item for item in snapshot['entitlement_evidence']
                            if item['user_id'] == first)
         self.h.engine._save_action(resync, plan['id'], 'accepted', started=True)
-        body = {'user_id': first,
-            'expected_revision': resync['preconditions']['projection_revision'],
+        body = {'schema_version': 2, 'user_id': first,
+            'expected_provider_customer_id': resync['preconditions']['provider_customer_id'],
+            'expected_identity_revision': resync['preconditions']['identity_revision'],
+            'expected_policy_revision': resync['preconditions']['policy_revision'],
+            'expected_projection_revision': resync['preconditions']['projection_revision'],
+            'processing_id': 'processing-'+resync['id'], 'trace_id': 'trace-'+resync['id'],
             'entitlement': {key: entitlement[key] for key in
-                ('product_id', 'expires_at', 'entitlement_hash', 'transaction_id', 'source_fingerprint')},
+                ('product_id', 'expires_at', 'entitlement_hash', 'transaction_id',
+                 'source_fingerprint', 'store', 'source_environment')},
             'operation_key': resync['id']}
         service.internal_request(self.h.provider.key, self.h.engine.lumen_url, 'POST',
                                  '/internal/lumen/resync', body)
@@ -296,6 +319,14 @@ class LiveRecoveryRestartTests(unittest.TestCase):
             initial = first._provider_get('/internal/live/status', {})
             run_id = first._provider_get('/internal/manifest', {})['run_id']
             self.assertEqual(initial['observed_count'], 0)
+
+            # Every full-scope read, including an incomplete pass, is subject to
+            # the durable 60-second source cadence.
+            provider_db = domain.connect(root/'provider.db')
+            try:
+                domain._set_meta(provider_db,'adapty_full_pass_started_epoch',time.time()-61)
+            finally:
+                provider_db.close()
 
             source.fail = False
             with (patch.object(adapty_seed_setup, 'read_cli_catalog', return_value=catalog_fixture()),

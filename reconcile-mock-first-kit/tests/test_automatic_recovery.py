@@ -88,7 +88,7 @@ class AutomaticRecoveryTests(unittest.TestCase):
         self.assertEqual(plan['expected_effect']['provider_writes'], 0)
         self.assertFalse(plan['expected_effect']['manual_grant'])
         self.assertEqual([row['actor'] for row in approvals],
-                         ['policy:local-entitlement-resync-v1'])
+                         ['policy:local-fulfillment-resync-v2'])
         report = self.h.engine._report(incident_id)
         self.assertEqual(report['recovery']['access_verified'], 24)
         self.assertEqual(report['coverage']['provider_evidence'], 0)

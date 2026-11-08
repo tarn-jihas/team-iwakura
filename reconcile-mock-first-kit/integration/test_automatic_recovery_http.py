@@ -59,7 +59,7 @@ class AutomaticRecoveryHTTPTests(unittest.TestCase):
         self.assertEqual(audit_status, 200)
         self.assertTrue(audit['approvals'])
         self.assertEqual({row['actor'] for row in audit['approvals']},
-                         {'policy:local-entitlement-resync-v1'})
+                         {'policy:local-fulfillment-resync-v2'})
 
         operation = {'action': 'once', 'operation_key': 'automatic-http-repeat'}
         status, accepted = self.exchange('engine', '/api/recovery/simulation', operation)

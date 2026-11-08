@@ -24,25 +24,41 @@ def _cause(snapshot, incident):
                 'The scan did not confirm an account with current source-backed access, so no cause or repair is claimed.')
     local = [clients.get(row['id'], {}) for row in accounts]
     gates = [row.get('gate', {}) for row in local]
+    observed = set()
+    for account, client, gate in zip(accounts, local, gates):
+        if gate.get('reason') == 'cache_stale':
+            observed.add('cache')
+        elif not client.get('access_active'):
+            observed.add('projection')
+        elif gate.get('reason') == 'subscription_expired' or (
+                gate.get('allowed') is True and account.get('projection_matches_source_period') is False):
+            observed.add('period')
+        else:
+            observed.add('access')
+    if len(observed) > 1:
+        return ('Multiple application access inconsistencies',
+                'Individual accounts have different observed projection, cache or period mismatches. A shared cause has not been established.')
+    if observed == {'period'} and any(gate.get('allowed') is True for gate in gates):
+        return ('Lumen access period differs from Adapty',
+                'The local period does not match the current source period, even though access is still allowed. No customer denial is claimed.')
+    if observed == {'projection'}:
+        return ('Lumen access was not projected',
+                'Adapty showed current access while Lumen had no active local projection. This is correlated local delivery evidence, not proof of the original cause.')
     if any(row.get('reason') == 'cache_stale' for row in gates):
         return ('Lumen cache was stale',
                 'Adapty showed current access while Lumen denied export on a stale cache. This is correlated local delivery evidence, not proof of the original cause.')
     if any(row.get('reason') == 'subscription_expired' for row in gates):
         return ('Lumen had an older entitlement expiry',
                 'Adapty showed current access while Lumen evaluated an earlier local expiry. This is correlated local delivery evidence, not proof of the original cause.')
-    if any(not row.get('access_active') and gate.get('reason') == 'subscription_inactive'
-           for row, gate in zip(local, gates)):
-        return ('Lumen access was not projected',
-                'Adapty showed current access while Lumen had no active local projection. This is correlated local delivery evidence, not proof of the original cause.')
     return ('Lumen denied access despite current source evidence',
             'The scan found current Adapty entitlements and denied Lumen gates. The observed evidence does not establish a more specific cause.')
 
 
-def build(engine):
+def build(engine, cursor=None, limit=None, status=None):
     manifest = engine._manifest()
     live = bool(engine.live_config and manifest.get('scenario') == 'live_adapty')
     if not live:
-        return {'mode': 'FULL_MOCK', 'app': {'id': manifest.get('app'),
+        result = {'mode': 'FULL_MOCK', 'app': {'id': manifest.get('app'),
             'title': manifest.get('app_title'), 'environment': manifest.get('environment')},
             'automation': {'enabled': False, 'policy_id': None},
             'connection': {'ready': False, 'source_observed_at': None,
@@ -54,6 +70,27 @@ def build(engine):
                           'retries': 0, 'last_error': None},
             'simulation': {'status': 'idle', 'completed': 0, 'total': 0, 'error': None},
             'incidents': []}
+        if cursor is not None or limit is not None or status is not None:
+            result['pagination'] = {'cursor': '0' if cursor is None else str(cursor),
+                'limit': 0 if limit is None else limit, 'next_cursor': None,
+                'total': 0, 'status': status}
+        return result
+
+    requested_status = status
+    paged = cursor is not None or limit is not None or status is not None
+    if status is not None and status not in ('needs_attention','detecting','repairing','repaired','unresolved'):
+        raise ValueError('Unsupported monitor status')
+    try:
+        offset = int(cursor or 0)
+    except (TypeError, ValueError) as exc:
+        raise ValueError('Invalid monitor cursor') from exc
+    page_limit = 50 if limit is None and paged else limit
+    if offset < 0 or page_limit is not None and (isinstance(page_limit,bool)
+            or not isinstance(page_limit,int) or not 1 <= page_limit <= 200):
+        raise ValueError('Invalid monitor page')
+    if status is not None and not paged:
+        paged = True
+        page_limit = 50
 
     try:
         source = engine._internal_request(engine.provider_url, 'GET', '/internal/live/status')
@@ -72,17 +109,62 @@ def build(engine):
 
     db = domain.connect(engine.db_path)
     try:
-        incidents = [dict(row) for row in db.execute(
-            'SELECT id,incident_json,created_at FROM incidents ORDER BY created_at DESC,rowid DESC')]
-        snapshots = {row['id']: json.loads(row['snapshot_json']) for row in db.execute(
-            'SELECT id,snapshot_json FROM snapshots')}
-        plans = [dict(row) for row in db.execute(
-            'SELECT id,incident_id,plan_json,status,created_at_wall FROM plans ORDER BY created_at_wall,rowid')]
-        actions = [dict(row) for row in db.execute('SELECT * FROM actions ORDER BY rowid')]
-        decisions = [dict(row) for row in db.execute(
-            'SELECT * FROM automatic_recovery ORDER BY incident_id,attempt')]
-        jobs = [dict(row) for row in db.execute(
-            'SELECT id,kind,status,payload,result,error,updated_at FROM jobs')]
+        incident_sql = 'SELECT id,incident_json,created_at FROM incidents ORDER BY created_at DESC,rowid DESC'
+        incidents = [dict(row) for row in db.execute(incident_sql)]
+        incident_ids = [row['id'] for row in incidents]
+        if incident_ids:
+            marks = ','.join('?' for _ in incident_ids)
+            # The feed needs diagnosis fields, not every immutable source profile.
+            snapshots = {row['id']: {
+                'manifest': json.loads(row['manifest_json'] or '{}'),
+                'accounts': json.loads(row['accounts_json']),
+                'lumen_accounts': json.loads(row['clients_json'])}
+                for row in db.execute('''SELECT s.id,
+                    json_extract(s.snapshot_json,'$.manifest') AS manifest_json,
+                    (SELECT json_group_array(json_object(
+                        'id',json_extract(a.value,'$.id'),
+                        'status',json_extract(a.value,'$.status'),
+                        'projection_matches_source_period',json(a.value -> '$.projection_matches_source_period')))
+                     FROM json_each(s.snapshot_json,'$.accounts') a) AS accounts_json,
+                    (SELECT json_group_array(json_object(
+                        'user_id',json_extract(c.value,'$.user_id'),
+                        'access_active',json_extract(c.value,'$.access_active'),
+                        'gate',json_extract(c.value,'$.gate')))
+                     FROM json_each(s.snapshot_json,'$.lumen_accounts') c) AS clients_json
+                    FROM snapshots s WHERE s.incident_id IN ('''+marks+')',incident_ids)}
+            plans = [dict(row) for row in db.execute(
+                'SELECT id,incident_id,plan_json,status,created_at_wall FROM plans '
+                'WHERE incident_id IN ('+marks+') ORDER BY created_at_wall,rowid',incident_ids)]
+            plan_ids = [row['id'] for row in plans]
+            if plan_ids:
+                plan_marks = ','.join('?' for _ in plan_ids)
+                actions = [dict(row) for row in db.execute('SELECT * FROM actions WHERE plan_id IN ('+
+                    plan_marks+') ORDER BY rowid',plan_ids)]
+            else:
+                actions = []
+            decisions = [dict(row) for row in db.execute(
+                'SELECT * FROM automatic_recovery WHERE incident_id IN ('+marks+') ORDER BY incident_id,attempt',incident_ids)]
+            job_map = {}
+            for incident_id in incident_ids:
+                payload = json.dumps({'incident_id': incident_id}, ensure_ascii=False,
+                                     separators=(',',':'))
+                for row in db.execute('SELECT id,kind,status,payload,result,error,updated_at FROM jobs WHERE payload=?',
+                                      (payload,)):
+                    job_map[row['id']] = dict(row)
+            related_job_ids = {value for row in decisions for value in
+                               (row.get('auto_job_id'),row.get('execution_job_id')) if value}
+            if related_job_ids:
+                ids = list(related_job_ids)
+                marks_jobs = ','.join('?' for _ in ids)
+                for row in db.execute('SELECT id,kind,status,payload,result,error,updated_at FROM jobs '
+                                      'WHERE id IN ('+marks_jobs+')',ids):
+                    job_map[row['id']] = dict(row)
+            jobs = list(job_map.values())
+        else:
+            snapshots,plans,actions,decisions,jobs = {},[],[],[],[]
+        fulfillment_coverage = domain._meta(db,'fulfillment_coverage',{})
+        fulfillment_counts = {row['status']:row['count'] for row in db.execute(
+            'SELECT status,COUNT(*) AS count FROM fulfillment_expectations GROUP BY status')}
     finally:
         db.close()
     decisions_by_incident = {}
@@ -232,13 +314,21 @@ def build(engine):
             'duration_ms': duration_ms, 'repair_summary': summary,
             'next_step': next_step, 'source_provenance': provenance,
             'payment_verification': payment, 'actions': action_feed})
+    all_feed = feed
+    filtered_feed = [item for item in all_feed if requested_status is None
+        or requested_status == 'needs_attention' and item['status'] != 'repaired'
+        or item['status'] == requested_status]
+    if paged:
+        feed = filtered_feed[offset:offset+page_limit]
+    else:
+        feed = all_feed
     current = source.get('cli_catalog') or {}
-    total_affected = sum(item['affected_accounts'] for item in feed)
-    return {'mode': 'LIVE_ADAPTY_SEEDED',
+    total_affected = sum(item['affected_accounts'] for item in all_feed)
+    result = {'mode': 'LOCAL_ADAPTY_FIXTURE' if manifest.get('provenance') == 'synthetic_test_fixture' else 'LIVE_ADAPTY_SEEDED',
         'app': {'id': manifest.get('app'), 'title': manifest.get('app_title'),
                 'environment': manifest.get('environment')},
         'automation': {'enabled': bool(engine.auto_repair),
-                       'policy_id': 'local-entitlement-resync-v1' if engine.auto_repair else None},
+                       'policy_id': 'local-fulfillment-resync-v2' if engine.auto_repair else None},
         'connection': {'ready': source.get('account_count') == 100
                 and source.get('observed_count') == 100
                 and source.get('identity_match_count') == 100,
@@ -247,10 +337,24 @@ def build(engine):
             'total_accounts': source.get('account_count', 0),
             'cli_version': current.get('cli_version'),
             'catalog_product_count': current.get('product_count')},
-        'summary': {'incidents': len(feed),
-            'fixed': sum(item['status'] == 'repaired' for item in feed),
-            'needs_attention': sum(item['status'] == 'unresolved' for item in feed),
+        'summary': {'incidents': len(all_feed),
+            'fixed': sum(item['status'] == 'repaired' for item in all_feed),
+            'needs_attention': sum(item['status'] == 'unresolved' for item in all_feed),
             'affected_accounts': total_affected},
         'telemetry': {key: telemetry.get(key) for key in
             ('queued', 'accepted', 'dropped', 'failed', 'retries', 'last_error')},
-        'simulation': simulation, 'incidents': feed}
+        'simulation': simulation, 'incidents': feed,
+        'coverage': {**(fulfillment_coverage or {}),
+            'source_requests_total': source.get('source_requests_total', 0),
+            'last_source_request_at': source.get('last_source_request_at'),
+            'last_source_pass': source.get('last_source_pass')},
+        'proactive': {'expectations': sum(fulfillment_counts.values()),
+            'statuses': fulfillment_counts,
+            'waiting_reason': (fulfillment_coverage or {}).get('waiting_reason'),
+            'source_calls_last_pass': (fulfillment_coverage or {}).get('source_calls_last_pass', 0)}}
+    if paged:
+        next_offset = offset+len(feed)
+        result['pagination'] = {'cursor': str(offset), 'limit': page_limit,
+            'next_cursor': str(next_offset) if next_offset < len(filtered_feed) else None,
+            'total': len(filtered_feed), 'status': requested_status}
+    return result

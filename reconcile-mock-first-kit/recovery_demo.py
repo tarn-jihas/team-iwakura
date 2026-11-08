@@ -37,10 +37,14 @@ def private_key(path):
 
 class Demo:
     """Own only child processes and their runtime; useful to the external UAT harness."""
-    def __init__(self, runtime, port=0, *, live_config=None, auto_repair=False):
+    def __init__(self, runtime, port=0, *, live_config=None, auto_repair=False,
+                 live_bootstrap_pending=False):
         self.runtime = Path(runtime).resolve()
         self.live_config = Path(live_config).resolve() if live_config else None
         self.auto_repair = bool(auto_repair)
+        self.live_bootstrap_pending = bool(live_bootstrap_pending)
+        if self.live_bootstrap_pending and (not self.live_config or not self.auto_repair):
+            raise ValueError('Pending live bootstrap requires automatic live demo mode')
         self.port = port or free_port()
         self.processes = {}
         self.logs = {}
@@ -55,6 +59,8 @@ class Demo:
                    '--key-file', str(key), '--demo']
         if self.live_config:
             command += ['--live-config', str(self.live_config)]
+        if self.live_bootstrap_pending:
+            command += ['--live-bootstrap-pending']
         if role == 'engine' and self.auto_repair:
             command += ['--auto-repair']
         if role in ('lumen', 'engine'):
