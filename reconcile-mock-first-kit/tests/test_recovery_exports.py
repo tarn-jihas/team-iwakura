@@ -84,7 +84,7 @@ class RecoveryExportTests(unittest.TestCase):
         db = domain.connect(h.engine.db_path)
         try:
             row = db.execute('SELECT expectation_id FROM fulfillment_expectations '
-                'ORDER BY expectation_id LIMIT 1').fetchone()
+                "WHERE json_extract(key_json,'$.customer_id')=?",(h.users[-1],)).fetchone()
             expectation_id = row['expectation_id']
             db.execute('UPDATE fulfillment_traces SET incident_id=? WHERE expectation_id=?',
                 (incident_id, expectation_id))

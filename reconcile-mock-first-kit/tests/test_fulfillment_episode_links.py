@@ -68,11 +68,11 @@ class FulfillmentEpisodeLinkTests(unittest.TestCase):
         finally:
             db.close()
 
-    def test_late_receipt_keeps_closed_owner_but_later_failure_uses_current_episode(self):
+    def test_receipt_owner_uses_processing_identity_across_episodes(self):
         closed_at = datetime.now(timezone.utc)-timedelta(seconds=2)
         transaction = json.loads(self.expectation['key_json'])['transaction_id']
         trace = {'source_fingerprint':self.expectation['source_fingerprint'],
-            'transaction_id':transaction,'status':'verified_application',
+            'transaction_id':transaction,'status':'verified_application','processing_id':'old-processing',
             'created_at':service.iso_precise(closed_at)}
         db = domain.connect(self.h.engine.db_path)
         try:
@@ -84,9 +84,12 @@ class FulfillmentEpisodeLinkTests(unittest.TestCase):
         event = {'app_user_id':self.user,'kind':'handler_completed',
             'occurred_at':service.iso_precise(closed_at-timedelta(seconds=1)),
             'details':{'transaction_id':transaction,
-                'source_hash':self.expectation['source_fingerprint']}}
+                'source_hash':self.expectation['source_fingerprint'],'processing_id':'old-processing'}}
         self.assertEqual(self.h.engine._open_fulfillment_incident_for_handler(event),'old')
         event['occurred_at'] = service.iso_precise(closed_at+timedelta(seconds=1))
+        self.assertEqual(self.h.engine._open_fulfillment_incident_for_handler(event),'old')
+        event['details']['processing_id'] = 'new-processing'
+        event['occurred_at'] = service.iso_precise(closed_at-timedelta(seconds=1))
         self.assertEqual(self.h.engine._open_fulfillment_incident_for_handler(event),'current')
         db = domain.connect(self.h.engine.db_path)
         try:
@@ -207,15 +210,7 @@ class FulfillmentEpisodeLinkTests(unittest.TestCase):
         else:
             for index in order:
                 operations[index]()
-        for _ in range(10):
-            db = domain.connect(engine.db_path)
-            try:
-                row = db.execute("SELECT id FROM jobs WHERE status='queued' ORDER BY rowid LIMIT 1").fetchone()
-            finally:
-                db.close()
-            if row is None:
-                break
-            engine._run_job(row['id'])
+        self._finish_jobs()
         db = domain.connect(engine.db_path)
         try:
             self.assertEqual(db.execute('SELECT COUNT(*) FROM incidents').fetchone()[0],1)
@@ -224,6 +219,55 @@ class FulfillmentEpisodeLinkTests(unittest.TestCase):
         finally:
             db.close()
         self.assertTrue(domain.lumen_access(self.h.lumen.db_path,self.user)['allowed'])
+
+    def _finish_jobs(self):
+        engine = self.h.engine
+        for _ in range(10):
+            db = domain.connect(engine.db_path)
+            try:
+                row = db.execute("SELECT id FROM jobs WHERE status='queued' ORDER BY rowid LIMIT 1").fetchone()
+            finally:
+                db.close()
+            if row is None:
+                return
+            engine._run_job(row['id'])
+        self.fail('Recovery jobs did not settle within their bounded retry chain')
+
+    def test_fast_repeated_recovery_records_failure_and_verification_without_audit_tick(self):
+        engine = self.h.engine
+        engine.auto_repair = True
+        db = domain.connect(engine.db_path)
+        try:
+            db.execute('UPDATE fulfillment_expectations SET incident_id=NULL,episode_open=0')
+        finally:
+            db.close()
+        owners = []
+        for episode in range(2):
+            db = domain.connect(self.h.lumen.db_path)
+            try:
+                db.execute('UPDATE access SET active=0,cache_active=0,'
+                    'projection_revision=projection_revision+1,cache_revision=cache_revision+1 '
+                    'WHERE user_id=?',(self.user,))
+            finally:
+                db.close()
+            event = self._handler_event()
+            event['event_id'] = 'fast-episode-'+str(episode)
+            event['details'].update(processing_id='fast-processing-'+str(episode),
+                trace_id='fast-trace-'+str(episode))
+            envelope = {'schema_version':2,'event':event,'sent_at':int(time.time())}
+            accepted = engine._collect(envelope,sign(envelope,engine.key))
+            owners.append(accepted['incident_id'])
+            self._finish_jobs()
+            trace = engine._fulfillment_trace(accepted['incident_id'])
+            assessments = [row for row in trace['traces']
+                if row.get('processing_id')==event['details']['processing_id']]
+            self.assertEqual({row['status'] for row in assessments},
+                {'discrepancy','verified_application'})
+            self.assertTrue(all(row.get('snapshot_id') for row in assessments))
+            self.assertIn(event['details']['trace_id'],
+                {row['trace_id'] for row in trace['processing_receipts']})
+            self.assertTrue(domain.lumen_access(self.h.lumen.db_path,self.user)['allowed'])
+        self.assertEqual(len(set(owners)),2)
 
     def test_collector_before_audit_claims_one_episode_before_scan(self):
         self._assert_collector_and_audit_share_one_episode((0,1))

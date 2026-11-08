@@ -1091,7 +1091,6 @@ class RecoveryService:
                 (incident_id,))]
             expectation_ids = sorted({item['expectation_id'] for item in traces})
             historical = {}
-            receipts_by_event = {}
             for trace in traces:
                 expectation_id = trace['expectation_id']
                 historical[expectation_id] = {'expectation_id': expectation_id,
@@ -1102,18 +1101,6 @@ class RecoveryService:
                     'episode_no': trace.get('episode_no'),
                     'incident_id': trace.get('incident_id'),
                     'trace_id': trace.get('trace_id')}
-                if trace.get('transaction_id') and trace.get('source_fingerprint'):
-                    for receipt in db.execute('SELECT event_id,trace_id,transaction_id,steps_json,recorded_at '
-                            'FROM fulfillment_receipts WHERE incident_id=? AND user_id=? '
-                            'AND transaction_id=? AND source_fingerprint=? ORDER BY recorded_at,event_id',
-                            (incident_id,trace.get('user_id'),trace['transaction_id'],
-                             trace['source_fingerprint'])):
-                        receipts_by_event[receipt['event_id']] = {
-                            'event_id': receipt['event_id'], 'trace_id': receipt['trace_id'],
-                            'user_id': trace.get('user_id'),
-                            'transaction_id': receipt['transaction_id'],
-                            'steps': json.loads(receipt['steps_json']),
-                            'recorded_at': receipt['recorded_at']}
             current_fulfillments = []
             for expectation_id in expectation_ids:
                 row = db.execute('SELECT * FROM fulfillment_expectations WHERE expectation_id=?',
@@ -1127,7 +1114,11 @@ class RecoveryService:
                         'episode_no': row['episode_no'], 'episode_open': bool(row['episode_open']),
                         'incident_id': row['incident_id'], 'updated_at': row['updated_at']})
             expectations = list(historical.values())
-            receipts = list(receipts_by_event.values())
+            receipts = [{'event_id':row['event_id'],'trace_id':row['trace_id'],
+                'user_id':row['user_id'],'transaction_id':row['transaction_id'],
+                'steps':json.loads(row['steps_json']),'recorded_at':row['recorded_at']}
+                for row in db.execute('SELECT * FROM fulfillment_receipts WHERE incident_id=? '
+                    'ORDER BY recorded_at,event_id',(incident_id,))]
             activity = [{'occurred_at': row['occurred_at'], 'kind': row['kind'],
                          'details': json.loads(row['details_json'])}
                 for row in db.execute('SELECT occurred_at,kind,details_json FROM fulfillment_activity '
@@ -1468,6 +1459,7 @@ class RecoveryService:
                 'CREATE INDEX IF NOT EXISTS fulfillment_receipts_incident ON fulfillment_receipts(incident_id,recorded_at,event_id)',
                 'CREATE TABLE IF NOT EXISTS fulfillment_expectations(expectation_id TEXT PRIMARY KEY,key_json TEXT NOT NULL,source_version TEXT NOT NULL,version INTEGER NOT NULL,period_start TEXT,period_end TEXT,source_fingerprint TEXT,original_transaction_id TEXT,status TEXT NOT NULL,reason TEXT NOT NULL,first_observed_at TEXT NOT NULL,last_observed_at TEXT NOT NULL,incident_id TEXT,episode_no INTEGER NOT NULL DEFAULT 0,episode_open INTEGER NOT NULL DEFAULT 0,telemetry_gap INTEGER NOT NULL DEFAULT 0,source_json TEXT NOT NULL,application_json TEXT NOT NULL,updated_at TEXT NOT NULL,UNIQUE(key_json,source_version))',
                 'CREATE INDEX IF NOT EXISTS fulfillment_expectations_updated ON fulfillment_expectations(updated_at DESC,expectation_id)',
+                'CREATE INDEX IF NOT EXISTS fulfillment_expectations_source ON fulfillment_expectations(source_fingerprint)',
                 'CREATE TABLE IF NOT EXISTS fulfillment_activity(activity_id TEXT PRIMARY KEY,expectation_id TEXT NOT NULL,incident_id TEXT,occurred_at TEXT NOT NULL,kind TEXT NOT NULL,details_json TEXT NOT NULL)',
                 'CREATE INDEX IF NOT EXISTS fulfillment_activity_time ON fulfillment_activity(occurred_at,activity_id)',
                 'CREATE TABLE IF NOT EXISTS fulfillment_traces(trace_id TEXT PRIMARY KEY,expectation_id TEXT NOT NULL,incident_id TEXT,user_id TEXT NOT NULL,trace_json TEXT NOT NULL,updated_at TEXT NOT NULL)',
@@ -2350,6 +2342,7 @@ class RecoveryService:
                         opened = row['episode_open'] and not (decision and decision['status']=='completed')
                         claims.append((row,row['episode_no'] if opened else row['episode_no']+1))
                 self._bind_fulfillment_claims(db,incident_id,claims)
+                self._record_fulfillment_snapshot_traces(db,incident_id,snapshot,observations)
             if (schedule_auto and self.auto_repair
                     and snapshot['manifest'].get('scenario') == 'live_adapty'):
                 selected_ids = sorted(row['id'] for row in accounts
@@ -2381,6 +2374,62 @@ class RecoveryService:
             db.close()
         # The queued policy job is durable before a worker can observe it.
         return snapshot
+
+    def _record_fulfillment_snapshot_traces(self, db, incident_id, snapshot, observations):
+        event_row = db.execute('SELECT e.event_json FROM collector_events e JOIN incidents i '
+            'ON i.trigger_event_id=e.event_id WHERE i.id=?',(incident_id,)).fetchone()
+        trigger = None if event_row is None else json.loads(event_row['event_json'])
+        for account in snapshot['accounts']:
+            if account['status'] not in ('confirmed','healthy'):
+                continue
+            user_id = account['id']
+            row = db.execute('SELECT * FROM fulfillment_expectations WHERE incident_id=? '
+                "AND source_fingerprint=? AND json_extract(key_json,'$.customer_id')=? "
+                "AND json_extract(key_json,'$.transaction_id')=?",
+                (incident_id,account.get('evidence_hash'),user_id,
+                 account.get('source_transaction_id'))).fetchone()
+            if row is None:
+                continue
+            processing = observations.get('handler_results_by_key',{}).get((
+                user_id,account.get('source_transaction_id'),account.get('evidence_hash'))) or {}
+            processing_id = processing.get('processing_id')
+            processing_trace_id = (processing.get('result') or {}).get('trace_id')
+            processing_outcome = processing.get('outcome')
+            details = (trigger or {}).get('details') or {}
+            if (trigger and trigger.get('kind') == 'handler_completed'
+                    and trigger.get('app_user_id') == user_id
+                    and details.get('transaction_id') == account.get('source_transaction_id')
+                    and details.get('source_hash') == account.get('evidence_hash')):
+                processing_id,processing_trace_id,processing_outcome = (
+                    details.get('processing_id'),details.get('trace_id'),details.get('outcome'))
+            projection_matches = account.get('projection_matches_source_period') is True
+            allowed = (account.get('gate') or {}).get('allowed')
+            trace_id = 'snapshot-trace:'+digest({'snapshot':snapshot['id'],'user':user_id})
+            status = 'discrepancy' if account['status']=='confirmed' else 'verified_application'
+            at = self.wall_now_precise()
+            trace = {'trace_id':trace_id,'snapshot_id':snapshot['id'],
+                'expectation_id':row['expectation_id'],'incident_id':incident_id,
+                'user_id':user_id,'key':json.loads(row['key_json']),'version':row['version'],
+                'episode_no':row['episode_no'],'transaction_id':account.get('source_transaction_id'),
+                'source_fingerprint':account.get('evidence_hash'),'status':status,
+                'reason':account['reason'],'telemetry_gap':bool(row['telemetry_gap']),
+                'source_period':{'starts_at':row['period_start'],'expires_at':row['period_end']},
+                'next_step':('No write; source period and Lumen gate already match'
+                    if status=='verified_application' else
+                    'Reconcile the existing source transaction to the Lumen projection'),
+                'created_at':at,'steps':[
+                    {'name':'fresh_source_read','status':'completed','owner':'source','result':'verified'},
+                    {'name':'identity_check','status':'completed','owner':'engine','result':'verified'},
+                    {'name':'policy_check','status':'completed','owner':'lumen','result':'verified'},
+                    {'name':'projection_readback','status':'completed' if projection_matches else 'failed',
+                     'owner':'lumen','result':'matched' if projection_matches else 'mismatched'},
+                    {'name':'gate_readback','status':'completed' if allowed is True else 'failed' if allowed is False else 'unknown',
+                     'owner':'lumen','result':'allowed' if allowed is True else 'denied' if allowed is False else 'unknown'}]}
+            if processing_id:
+                trace.update(processing_id=processing_id,processing_trace_id=processing_trace_id,
+                    processing_outcome=processing_outcome)
+            db.execute('INSERT OR IGNORE INTO fulfillment_traces VALUES(?,?,?,?,?,?)',
+                (trace_id,row['expectation_id'],incident_id,user_id,_json(trace),at))
 
     def _has_fresh_complete_source_pass(self):
         try:
@@ -4580,6 +4629,8 @@ class RecoveryService:
         if not self.sdk or not result or not result.get('before') or not result.get('after'):
             return None
         try:
+            before = {key:value for key,value in result['before'].items()
+                      if key != 'source_hash' or value is not None}
             details = {
                     'action_id': action_id, 'source_hash': result.get('source_hash') or 'unknown',
                     'expected_revision': result['before']['projection_revision'],
@@ -4587,7 +4638,7 @@ class RecoveryService:
                     'adapter_version': result.get('adapter_version', 'adapty-profile-read-v1'),
                     'projection_version': handler_version or result.get('projection_version', 'lumen-projection-v2'),
                     'cache_version': config_version or result.get('config_version', 'lumen-cache-v2'),
-                    'outcome': 'projection_updated', 'before': result['before'],
+                    'outcome': 'projection_updated', 'before': before,
                     'after': result['after'], 'cache_invalidated': bool(result['after'].get('invalidated'))}
             if result.get('schema_version') == 2:
                 details.update(processing_id=result['processing_id'], trace_id=result['trace_id'],
@@ -5826,21 +5877,16 @@ class RecoveryService:
             if not all(isinstance(value,str) and value for value in
                        (transaction_id,source_fingerprint)):
                 return None
-            # Late receipts belong to the episode that finished after the event,
-            # even when the same source right has since entered another episode.
-            try:
-                event_time = parse_time(event.get('occurred_at'))
-            except RecoveryError:
-                event_time = None
-            if event_time is not None:
+            # Processing identity, rather than collection time, binds a late receipt.
+            processing_id = details.get('processing_id')
+            if isinstance(processing_id,str) and processing_id:
                 for row in db.execute('SELECT incident_id,trace_json FROM fulfillment_traces '
                         'WHERE user_id=? AND incident_id IS NOT NULL ORDER BY updated_at,trace_id',
                         (user_id,)):
                     trace = json.loads(row['trace_json'])
                     if (trace.get('source_fingerprint') == source_fingerprint
                             and trace.get('transaction_id') == transaction_id
-                            and trace.get('status') == 'verified_application'
-                            and event_time <= parse_time(trace['created_at'])):
+                            and trace.get('processing_id') == processing_id):
                         return row['incident_id']
             rows = db.execute('SELECT key_json,incident_id,episode_open FROM fulfillment_expectations '
                 'WHERE source_fingerprint=? AND incident_id IS NOT NULL ORDER BY episode_no DESC',

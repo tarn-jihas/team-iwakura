@@ -174,7 +174,12 @@ class FulfillmentBackendTests(unittest.TestCase):
         self.assertTrue(projection['allowed'])
         revision = projection['projection_revision']
         queued = harness.lumen.sdk.coverage()['queued']
-        self.assertEqual(queued, 2)
+        self.assertEqual(queued, 3)
+        with sqlite3.connect(harness.lumen.sdk.outbox_path) as db:
+            events = [json.loads(row[0]) for row in db.execute('SELECT event_json FROM sdk_events')]
+        projection_event = next(item for item in events if item['kind']=='access_projection_changed')
+        self.assertNotIn('source_hash',projection_event['details']['before'])
+        self.assertEqual(projection_event['details']['processing_id'],processing_id)
         receipt = domain.lumen_handler_result(harness.lumen.db_path, processing_id)
         self.assertEqual(receipt['outcome'], 'completed')
         self.assertEqual(receipt['result']['steps'][0]['name'], 'receive')
