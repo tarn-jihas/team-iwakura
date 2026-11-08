@@ -52,7 +52,10 @@ class LocalCollector:
                     collector.requests.append((envelope, signature, self.headers.get('Content-Type')))
                     if not isinstance(envelope, dict) or set(envelope) != {'schema_version', 'event', 'sent_at'}:
                         raise ValueError('bad envelope')
-                    if type(envelope['schema_version']) is not int or envelope['schema_version'] != 1:
+                    if (type(envelope['schema_version']) is not int
+                            or envelope['schema_version'] not in (1, 2)
+                            or not isinstance(envelope.get('event'), dict)
+                            or envelope['event'].get('schema_version') != envelope['schema_version']):
                         raise ValueError('bad envelope version')
                     if type(envelope['sent_at']) is not int:
                         raise ValueError('bad timestamp')
@@ -147,6 +150,33 @@ class RecoverySDKTests(unittest.TestCase):
         self.assertEqual(self.send(url, replay, key=b'wrong-key-012345678901234567890123')[0], 401)
         with self.assertRaises(CollectorAuthError):
             http_transport(url)(replay, sign(replay, b'wrong-key-012345678901234567890123'))
+
+    def test_v2_processing_receipt_uses_v2_signed_envelope(self):
+        collector = LocalCollector()
+        server = ThreadingHTTPServer(('127.0.0.1', 0), collector.handler())
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(lambda: (server.shutdown(), server.server_close(), thread.join(timeout=3)))
+        url = f'http://127.0.0.1:{server.server_port}/api/recovery/collector'
+        sdk = self.make_sdk(http_transport(url), collector_url=url)
+        details = {'action_id': 'action-1', 'source_hash': 'a'*64,
+            'expected_revision': 1, 'policy_version': 'policy-v2',
+            'adapter_version': 'adapter-v2', 'projection_version': 'handler-v2',
+            'cache_version': 'cache-v2', 'outcome': 'projection_updated',
+            'before': {'active': False, 'projection_revision': 1},
+            'after': {'active': True, 'projection_revision': 2},
+            'cache_invalidated': False, 'processing_id': 'processing-1',
+            'trace_id': 'trace-1', 'transaction_id': 'txn-1',
+            'steps': [{'name': 'projection_commit', 'status': 'completed',
+                       'owner': 'lumen', 'result': 'committed', 'revision': 2}],
+            'revisions': {'identity': 1, 'policy': 1, 'projection': 2, 'cache': 2}}
+        sdk.emit('access_projection_changed', 'u00001', OCCURRED_AT, details,
+                 event_id='processing-1', schema_version=2)
+        self.assertEqual(sdk.flush()['accepted'], 1)
+        envelope, signature, _ = collector.requests[0]
+        self.assertEqual(envelope['schema_version'], 2)
+        self.assertEqual(envelope['event']['schema_version'], 2)
+        self.assertEqual(signature, sign(envelope, KEY))
 
     def test_allowlist_utc_scope_and_secret_safe_errors(self):
         delivered = []
@@ -342,6 +372,22 @@ class RecoverySDKTests(unittest.TestCase):
         sdk.emit('mobile_observation', 'u00001', OCCURRED_AT, details, event_id='mobile-1')
         self.assertEqual(sdk.flush()['accepted'], 1)
         self.assertEqual(received[0]['details'], details)
+        trace_details = {**details, 'processing_id': 'process-1', 'trace_id': 'trace-1',
+            'steps': [{'name': 'handler', 'status': 'completed', 'owner': 'lumen',
+                       'result': 'verified'}],
+            'revisions': {'identity': 1, 'policy': 1, 'projection': 2, 'cache': 2}}
+        sdk.emit('mobile_observation', 'u00001', OCCURRED_AT, trace_details,
+                 event_id='mobile-v2', schema_version=2)
+        self.assertEqual(sdk.flush()['accepted'], 1)
+        self.assertEqual(received[1]['schema_version'], 2)
+        self.assertEqual(received[1]['details']['trace_id'], 'trace-1')
+        accepted_events = len(received)
+        for field in ('transaction_id', 'processing_id', 'trace_id', 'steps', 'revisions'):
+            with self.subTest(nullable_field=field), self.assertRaises(ValueError):
+                sdk.emit('mobile_observation', 'u00001', OCCURRED_AT,
+                    {**trace_details, field: None}, event_id='mobile-v2-null-'+field,
+                    schema_version=2)
+        self.assertEqual(len(received), accepted_events)
         for extra in ({'paid': True}, {'receipt': 'secret'}, {'amount_minor': 999},
                       {'product_id': {'secret': 'value'}}, {'observation_kind': 'grant_premium'}):
             with self.subTest(extra=extra), self.assertRaises(ValueError):

@@ -10,6 +10,7 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import sqlite3
 import threading
 import time
@@ -17,6 +18,7 @@ from urllib.parse import urlsplit
 from uuid import uuid4
 
 SCHEMA_VERSION = 1
+TRACE_SCHEMA_VERSION = 2
 KINDS = frozenset({
     'webhook_received', 'handler_completed', 'access_projection_changed',
     'feature_access_decided', 'source_entitlement_observed',
@@ -37,6 +39,9 @@ DETAIL_FIELDS = frozenset({
     'policy_version', 'adapter_version', 'initiator', 'starts_at', 'expires_at',
     'action_id', 'expected_revision', 'actual_revision',
     'observation_kind', 'transaction_id', 'product_id', 'price_id',
+    'original_transaction_id', 'source_environment', 'store', 'access_level',
+    'customer_id', 'source_version', 'steps', 'revisions', 'processing_id',
+    'trace_id', 'stack',
 })
 _DETAIL_KEYS = {
     'mobile_observation': frozenset({'observation_kind', 'transaction_id', 'product_id', 'price_id', 'feature', 'reason_code'}),
@@ -57,13 +62,31 @@ _PROJECTION_RESYNC_FIELDS = frozenset({
     'adapter_version', 'projection_version', 'cache_version', 'outcome',
     'before', 'after', 'cache_invalidated',
 })
+_PROJECTION_RESYNC_V2_FIELDS = frozenset({
+    'processing_id', 'trace_id', 'transaction_id', 'steps', 'revisions',
+})
+_HANDLER_V2_FIELDS = _PROJECTION_RESYNC_V2_FIELDS | frozenset({
+    'projection_version', 'adapter_version', 'source_hash'})
+_TRACE_STEP_FIELDS = frozenset({'name', 'status', 'at', 'owner', 'result', 'revision',
+                                'reason_code', 'gap'})
+_TRACE_STEPS = frozenset({'receive', 'handler', 'fresh_source_read', 'identity_check',
+    'policy_check', 'projection_commit', 'cache_refresh', 'gate_readback',
+    'telemetry_enqueue', 'projection_readback', 'source_observation'})
+_TRACE_STATUSES = frozenset({'started', 'completed', 'failed', 'skipped', 'unknown'})
+_TRACE_OWNERS = frozenset({'source', 'lumen', 'engine', 'collector'})
+_TRACE_RESULTS = frozenset({'accepted', 'verified', 'failed', 'skipped', 'matched',
+    'mismatched', 'committed', 'queued', 'unavailable', 'not_required', 'observed', 'allowed',
+    'denied', 'replayed', 'unknown'})
+_TRACE_REASONS = frozenset({'source_unavailable', 'source_cooldown', 'identity_mismatch',
+    'policy_restricted', 'projection_mismatch', 'cache_mismatch', 'gate_denied',
+    'telemetry_gap', 'readback_unknown', 'timeout_after_commit', 'handler_failure'})
 _REASONS = frozenset({
     'allowed', 'policy_restricted', 'identity_ambiguous', 'identity_mismatch',
     'identity_unavailable', 'cache_unavailable', 'cache_stale',
     'subscription_expired', 'subscription_inactive', 'none',
     'source_unavailable', 'identity_source_mismatch', 'approved_resync',
     'resync_completed', 'cache_refresh_skipped', 'renewal_cancelled',
-    'handler_completed',
+    'handler_completed', 'handler_failure',
 })
 _MAX_EVENT_BYTES = 16 * 1024
 _MAX_PENDING = 1000
@@ -145,22 +168,88 @@ def _state(value, name):
             _text(item, field)
 
 
+def _trace_steps(value):
+    if not isinstance(value, list) or len(value) > 32:
+        raise ValueError('Invalid collector trace steps')
+    for step in value:
+        if (not isinstance(step, dict) or set(step)-_TRACE_STEP_FIELDS
+                or not {'name', 'status', 'owner', 'result'} <= set(step)
+                or any(not isinstance(step[key], str) for key in ('name', 'status', 'owner', 'result'))
+                or step['name'] not in _TRACE_STEPS
+                or step['status'] not in _TRACE_STATUSES
+                or step['owner'] not in _TRACE_OWNERS
+                or step['result'] not in _TRACE_RESULTS):
+            raise ValueError('Invalid collector trace step')
+        for key in ('name', 'status', 'owner', 'result'):
+            _text(step[key], key, 64)
+        if 'at' in step:
+            _timestamp(step['at'], 'trace step time')
+        if 'revision' in step and (type(step['revision']) is not int or step['revision'] < 0):
+            raise ValueError('Invalid collector trace revision')
+        if ('reason_code' in step and (not isinstance(step['reason_code'], str)
+                or step['reason_code'] not in _TRACE_REASONS)):
+            raise ValueError('Invalid collector trace reason')
+        if 'gap' in step and type(step['gap']) is not bool:
+            raise ValueError('Invalid collector trace gap')
+    if len(canonical(value)) > _MAX_EVENT_BYTES:
+        raise ValueError('Collector trace is too large')
+
+
+def _trace_revisions(value):
+    allowed = {'identity', 'policy', 'projection', 'cache'}
+    if (not isinstance(value, dict) or not value or set(value)-allowed
+            or any(type(item) is not int or item < 0 for item in value.values())):
+        raise ValueError('Invalid collector trace revisions')
+
+
+def _trace_stack(value):
+    if not isinstance(value, list) or len(value) > 8:
+        raise ValueError('Invalid collector trace stack')
+    for frame in value:
+        if (not isinstance(frame, dict) or set(frame) != {'module', 'function', 'line'}
+                or not isinstance(frame['module'], str)
+                or not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_.]*', frame['module'])
+                or not isinstance(frame['function'], str)
+                or not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', frame['function'])
+                or type(frame['line']) is not int or frame['line'] < 1):
+            raise ValueError('Invalid collector trace stack frame')
+    if len(canonical(value)) > 4096:
+        raise ValueError('Collector trace stack is too large')
+
+
 def _validate_details(kind, details):
     if not isinstance(details, dict) or set(details) - DETAIL_FIELDS:
         raise ValueError('Collector details do not match the metadata contract')
     if kind == 'access_projection_changed':
         expected = _PROJECTION_RESYNC_FIELDS if 'action_id' in details else _PROJECTION_CANCEL_FIELDS
+        if 'action_id' in details and _PROJECTION_RESYNC_V2_FIELDS & set(details):
+            expected = expected | _PROJECTION_RESYNC_V2_FIELDS
+            if 'stack' in details:
+                expected = expected | {'stack'}
+    elif kind == 'handler_completed' and _HANDLER_V2_FIELDS & set(details):
+        expected = _DETAIL_KEYS[kind] | _HANDLER_V2_FIELDS
     else:
         expected = _DETAIL_KEYS[kind]
-    if set(details) != expected:
+    optional_source = {'transaction_id', 'original_transaction_id', 'source_environment',
+        'store', 'access_level', 'customer_id', 'source_version'}
+    if kind == 'source_entitlement_observed':
+        valid_keys = expected | optional_source
+        if not expected <= set(details) or set(details)-valid_keys:
+            raise ValueError('Collector details do not match the event contract')
+    elif kind == 'mobile_observation':
+        optional_mobile = {'original_transaction_id'} | _PROJECTION_RESYNC_V2_FIELDS | {'stack'}
+        if not expected <= set(details) or set(details)-(expected | optional_mobile):
+            raise ValueError('Collector details do not match the event contract')
+    elif set(details) != expected:
         raise ValueError('Collector details do not match the event contract')
 
     for field, value in details.items():
-        if kind == 'mobile_observation' and field != 'observation_kind' and value is None:
+        if (kind == 'mobile_observation' and value is None and field in
+                ('transaction_id','product_id','price_id','feature','reason_code')):
             continue
         if field in ('before', 'after'):
             _state(value, field)
-        elif field in ('starts_at', 'expires_at', 'processed_at', 'received_at'):
+        elif field in ('starts_at', 'expires_at', 'processed_at', 'received_at', 'at'):
             _timestamp(value, field, allow_none=field in ('starts_at', 'expires_at'))
         elif field in ('expected_revision', 'actual_revision'):
             if type(value) is not int or value < 0:
@@ -168,6 +257,15 @@ def _validate_details(kind, details):
         elif field == 'cache_invalidated':
             if type(value) is not bool:
                 raise ValueError('Invalid collector '+field)
+        elif field == 'steps':
+            _trace_steps(value)
+        elif field == 'revisions':
+            _trace_revisions(value)
+        elif field == 'stack':
+            _trace_stack(value)
+        elif field == 'gap':
+            if type(value) is not bool:
+                raise ValueError('Invalid collector trace gap')
         else:
             _text(value, field)
 
@@ -182,14 +280,20 @@ def _validate_details(kind, details):
         raise ValueError('Unsupported collector initiator')
     if details.get('reason_code') is not None and details['reason_code'] not in _REASONS:
         raise ValueError('Unsupported collector reason code')
-    if 'event_type' in details and details['event_type'] != 'subscription_renewal_cancelled':
+    for step in details.get('steps', []):
+        if step.get('reason_code') is not None and step['reason_code'] not in _TRACE_REASONS:
+            raise ValueError('Unsupported collector trace reason')
+    if ('event_type' in details and details['event_type'] != 'subscription_renewal_cancelled'
+            and not (kind == 'handler_completed'
+                     and details['event_type'] == 'source_entitlement_observed')):
         raise ValueError('Unsupported collector event type')
-    if 'handler_version' in details and details['handler_version'] not in ('cancel-handler-v1', 'cancel-handler-v2'):
+    if ('handler_version' in details and details['handler_version'] not in ('cancel-handler-v1', 'cancel-handler-v2')
+            and not (kind == 'handler_completed' and _HANDLER_V2_FIELDS <= set(details))):
         raise ValueError('Unsupported collector handler version')
     if 'outcome' in details:
         outcomes = {
             'webhook_received': ('accepted',),
-            'handler_completed': ('completed',),
+            'handler_completed': ('completed', 'failed', 'unknown'),
             'source_entitlement_observed': ('observed', 'unavailable'),
             'resync_requested': ('requested',),
             'resync_completed': ('accepted',),
@@ -200,10 +304,11 @@ def _validate_details(kind, details):
 
 
 def validate_event(event, run_id=None, app=None, environment=None):
-    """Validate one exact version-1 collector DTO and optional fixed scope."""
+    """Validate a version-1 event or bounded version-2 processing receipt."""
     if not isinstance(event, dict) or set(event) != EVENT_FIELDS:
         raise ValueError('Collector event fields do not match the metadata contract')
-    if type(event['schema_version']) is not int or event['schema_version'] != SCHEMA_VERSION:
+    if type(event['schema_version']) is not int or event['schema_version'] not in (
+            SCHEMA_VERSION, TRACE_SCHEMA_VERSION):
         raise ValueError('Unsupported collector event schema version')
     for name in EVENT_FIELDS - {'schema_version', 'details'}:
         _text(event[name], name, 128 if name in ('run_id', 'app', 'environment', 'app_user_id') else 256)
@@ -217,6 +322,18 @@ def validate_event(event, run_id=None, app=None, environment=None):
     if environment is not None and event['environment'] != environment:
         raise ValueError('Collector environment scope mismatch')
     _validate_details(event['kind'], event['details'])
+    if (event['schema_version'] == TRACE_SCHEMA_VERSION
+            and not ((event['kind'] == 'access_projection_changed'
+                      and _PROJECTION_RESYNC_V2_FIELDS <= set(event['details']))
+                     or (event['kind'] == 'handler_completed'
+                         and _HANDLER_V2_FIELDS <= set(event['details'])
+                         and isinstance(event['details'].get('transaction_id'), str)
+                         and event['details']['transaction_id'])
+                     or (event['kind'] == 'mobile_observation'
+                         and _PROJECTION_RESYNC_V2_FIELDS <= set(event['details'])
+                         and isinstance(event['details'].get('transaction_id'), str)
+                         and event['details']['transaction_id']))):
+        raise ValueError('Version-2 collector events require a processing receipt')
     if len(canonical(event)) > _MAX_EVENT_BYTES:
         raise ValueError('Collector event is too large')
 
@@ -474,12 +591,12 @@ class CollectorSDK:
             db.close()
 
     def emit(self, kind, user_id, occurred_at, details, *, event_id=None,
-             source_event_id=None, correlation_id=None):
+             source_event_id=None, correlation_id=None, schema_version=SCHEMA_VERSION):
         event_id = str(uuid4()) if event_id is None else event_id
         source_event_id = event_id if source_event_id is None else source_event_id
         correlation_id = event_id if correlation_id is None else correlation_id
         event = {
-            'schema_version': SCHEMA_VERSION,
+            'schema_version': schema_version,
             'event_id': event_id, 'run_id': self.run_id, 'app': self.app,
             'environment': self.environment, 'app_user_id': user_id,
             'kind': kind, 'occurred_at': occurred_at,
@@ -517,7 +634,7 @@ class CollectorSDK:
                 accepted, error, retry_after, permanent = False, None, None, False
                 try:
                     event = json.loads(event_json)
-                    envelope = {'schema_version': SCHEMA_VERSION, 'event': event,
+                    envelope = {'schema_version': event['schema_version'], 'event': event,
                                 'sent_at': int(time.time())}
                     receipt = self.transport(envelope, sign(envelope, self.key))
                     if (not isinstance(receipt, dict) or receipt.get('accepted') is not True
