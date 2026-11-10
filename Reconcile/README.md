@@ -1,25 +1,76 @@
-# Reconcile — interactive product prototype
+# Browser UI
 
-A browser-only subscription reconciliation workspace built from synthetic Google Orders, Adapty projection and Mixpanel fixtures. No provider credentials, external MCP servers or model API are used.
+This directory holds the hand-written browser UI for Reconcile: plain HTML, CSS
+and JavaScript modules with no dependencies and no build step.
 
-## What runs
+`dist/` is the editable source, not build output. It is used in two ways:
 
-- A deterministic browser engine parses supported files, preserves USD numeric lexemes, uses BigInt minor units, distinguishes delivery retries from duplicate economic events and returns raw evidence.
-- Six bundled scenarios and a separate Google Orders ↔ Adapty reference comparison.
-- Cases, source inventory, three-step import, findings, operations, evidence drawers, local run history and report/evidence downloads.
-- Browser-local review states and saved cases, with a 20-run history limit per case.
-- Clearly labelled simulated AI explanations/tool traces derived from calculated findings.
+- The Python runtime serves it directly. `reconcile-mock-first-kit/recovery_service.py`
+  (and the older `reconcile_mock.py`) read files from `dist/` on each request.
+- The Preact app in `apps/web` imports the stylesheets (which load the fonts)
+  and the fixture data from `dist/`, so changes here affect both runtimes.
 
-## Scope
+Tests run from the repository root and no configuration is needed. See the
+[root README](../README.md) for how to start the demo.
 
-Google Play, USD, one explicitly chosen app namespace, documented cash-event subset and full-refund fixture convention. Inputs are capped at 10 MiB and 5,000 source records. Unsupported partial-refund history, conflicting delivery identities, malformed money, currencies and scope mixtures are rejected. Uploaded files are labelled user supplied and default to unknown coverage.
+## Pages
 
-The browser fingerprint is an FNV demonstration identifier, not a cryptographic digest. The planned Node/TypeScript glorious monolith, durable server manifests, SHA-256 evidence, real MCP transport and model adapter are specified in the linked Google Doc and are not implemented by this static prototype.
+Each page is a small HTML shell that loads one script. Paths are as served by
+the Python runtime.
 
-## Development
+| Page | Served at | What it is | Script |
+| --- | --- | --- | --- |
+| `recovery.html` | `/` and `/recovery.html` | Main demo: the access recovery monitor. Shows the incident feed, starts and stops demo runs, opens an incident's steps and exports activity as CSV or JSON. Uses `/api/recovery/monitor`, `/simulation`, `/fulfillments`, `/incidents/…/trace` and `/export`. | `monitor-app.js`, `monitor-view.js` |
+| `recovery-console.html` | `/recovery-console.html` | Advanced recovery tools: the manual, approval-gated flow (open an incident, scan, plan, approve, execute, inspect evidence), with Lumen and lab sections for trying the gate and injecting faults. Uses the other `/api/recovery/*` routes. | `recovery-app.js`, `recovery-view.js` |
+| `access.html` | `/access.html` | Cancellation recovery demo: detect, preview, approve, apply and verify for accounts affected by a faulty cancellation handler. Uses `/api/access/*` and `/mock/lumen/export`. | `access-app.js`, `access-view.js` |
+| `index.html` | `/analytics.html` (and `/index.html`) | Analytics evidence workspace for the legacy analytics mock: findings, approval, apply, verification, audit and provider sample payloads. Uses `/api/*` and `/mock/*`. | `mock-app.js`, `mock-view.js` |
+| `legacy.html` | `/legacy.html` | Offline fixture lab. Runs entirely in the browser: `engine.js` parses and compares the files in `dist/data`, and review state and run history are kept in browser storage. Makes no API calls. | `app.js`, `engine.js` |
 
-Static assets are under `dist/`. No dependency installation or build is needed. Serve that directory with the Sites preview workflow or any standard static server.
+When `reconcile_mock.py serve` is run on its own (`npm run start:legacy`), `/`
+is `index.html` and only the `access.html`, `index.html` and `legacy.html`
+pages have a working backend.
 
-Run `node --test tests/engine.test.mjs` for 19 focused financial/format checks. The expectation values in tests do not ship in the browser runtime.
+## Fixture data
 
-Source provenance: organisers' seed commit `77d39ed807a66bbebcf24fe67c42be4fc9ef4c82`. `dist/data/projection_contract.json` records fixture assumptions and `dist/data/sources.json` links the official format references.
+`dist/data` contains small synthetic files used by the offline fixture lab and
+imported by `apps/web`. None of it is captured provider data.
+
+| File | Contents |
+| --- | --- |
+| `adapty.jsonl` | Provider-side events used as the reference in each scenario. |
+| `zero_net_two_errors.jsonl`, `missing_refund.jsonl`, `double_tracking.jsonl`, `repeated_delivery.jsonl`, `price_unit_error.jsonl`, `clean.jsonl` | Analytics-side export for each of the six bundled scenarios. |
+| `google_orders.json` | Store orders for the separate store-to-provider comparison. |
+| `projection_contract.json` | The assumptions behind the fixtures (amount basis, refund convention, identity mapping, what is omitted). |
+| `sources.json` | Links to the public format references and the organisers' seed revision the fixtures derive from. |
+
+The offline lab accepts uploads up to 10 MiB and 5,000 records, in USD only,
+and rejects inputs it cannot interpret safely, such as partial-refund history.
+Its content fingerprint is a non-cryptographic demonstration identifier.
+
+## Design
+
+The design tokens are CSS custom properties in the `:root` block of
+`dist/styles.css`. The rest of that stylesheet is also part of the design:
+component states, spacing, sizing, typography and responsive rules, some with
+values set directly in component rules rather than as named tokens. The
+page-specific stylesheets (`monitor.css`, `mock.css`, `access.css`,
+`recovery.css`) build on it.
+
+The primary typeface is Inter; Manrope is also bundled. Font files and their
+SIL Open Font Licenses are in `dist/fonts/`. Icons are implemented inline where
+they are used.
+
+## Tests
+
+`tests/` contains Node tests for the browser modules: the offline comparison
+engine (`engine.test.mjs`), the monitor page's rendering and polling lifecycle
+(`monitor-view`, `monitor-lifecycle`) and the view helpers of the other pages
+(`recovery-view`, `access-view`, `mock-view`). They run with the built-in Node test runner as the first part of
+the root command:
+
+```sh
+npm test
+```
+
+To run only these tests: `node --test Reconcile/tests/*.test.mjs` from the
+repository root.

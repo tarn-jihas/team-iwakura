@@ -1,20 +1,22 @@
-# Verified provider schemas and official examples (7 November 2026)
+# Provider API references (checked 7 November 2026)
 
-This index is **documentation-only**. The mock harness never makes third-party API requests, and each provider-shaped reference file is an authored **synthetic, partial projection**, not a downloaded receipt or complete contract test. All runtime connections are forbidden except `127.0.0.1`.
+This index is **documentation only**. It lists the public documentation behind the [legacy analytics mock](../README.md#legacy-analytics-mock) (`reconcile_mock.py`) and the sample payloads in [`../reference/`](../reference). Each provider-shaped file is an authored **synthetic, partial example**, not a downloaded receipt or a complete contract test. The analytics mock never contacts these services; its provider-style routes are local to `127.0.0.1`.
+
+The main recovery demo is separate: in live mode it reads Adapty profiles through the Get profile endpoint in the first row. See the [runtime README](../README.md).
 
 | Provider/API | Official source with example/schema | Important fields and mock rule |
 | --- | --- | --- |
 | Adapty S2S Get profile | https://adapty.io/docs/api-adapty/operations/getProfile | `GET /api/v2/server-side-api/profile/`, `data` envelope with `subscriptions`, `access_levels`, `total_revenue_usd`; **does not expose a row-by-row price ledger**. Local GET mock. |
-| Adapty Set transaction | https://adapty.io/docs/api-adapty/operations/setTransaction | `POST /api/v2/server-side-api/purchase/set/transaction/`; `purchase_type`, store IDs, `price.country/currency/value`, expiry; the organiser's script is NOT called. |
+| Adapty Set transaction | https://adapty.io/docs/api-adapty/operations/setTransaction | `POST /api/v2/server-side-api/purchase/set/transaction/`; `purchase_type`, store IDs, `price.country/currency/value`, expiry. Not called by the analytics mock. |
 | Adapty webhook examples | https://adapty.io/docs/webhook-event-types-and-fields | `event_type`, `event_datetime`, `event_properties.transaction_id`, `profile_event_id`, `price_local`, `price_usd`, `environment`, `original_transaction_id`. Local webhook-shape JSONL used as authoritative synthetic ledger. |
 | Adapty to Mixpanel event mapping | https://adapty.io/docs/mixpanel | `event`, `properties.time`, `$insert_id`, `currency`, `store`, `environment`, `original_transaction_id`. EU project needs Europe residency. Mock uses local event store. |
-| Adapty Developer CLI reference | https://adapty.io/docs/developer-cli-reference | CLI config and analytics commands are not an app-wide transaction enumeration API. No CLI command executed. |
+| Adapty Developer CLI reference | https://adapty.io/docs/developer-cli-reference | CLI config and analytics commands are not an app-wide transaction enumeration API. The analytics mock runs no CLI command. |
 | Adapty S3 exports | https://adapty.io/docs/s3-exports | Daily CSV exports; mock may model a file drop, but no S3 used. |
 | Adapty analytics FX conventions | https://adapty.io/docs/analytics-integration | Currencylayer, refreshed every eight hours, conversion fixed at transaction time. Mock stores synthetic local and USD side by side; it does not call FX API. |
 | Mixpanel Import Events (examples and responses) | https://docs.mixpanel.com/reference/import-events | `POST /import?strict=1&project_id=...` with event array, `distinct_id`, `time`, `$insert_id`; **partial validation failures can still ingest valid rows**. Mock uses local endpoint. |
 | Mixpanel Raw Event Export (JSONL example) | https://docs.mixpanel.com/reference/raw-event-export | `GET /api/2.0/export?from_date=...&to_date=...`; JSONL, not JSON array; date ranges inclusive. Mock local export; project date policies documented. |
-| Mixpanel Dedup + compaction | https://docs.mixpanel.com/reference/event-deduplication | Four-tuple `event, distinct_id, time, $insert_id` at query time. Official docs say **most recent** event in reports but do not guarantee upsert; raw export can preserve duplicates. Teammate's 'first event' observation does not trump docs. Mock policy explicit `query_latest`. |
-| Mixpanel Track Events | https://docs.mixpanel.com/reference/track-event | `/track` is distinct from historical `/import`. Not needed for P0. |
+| Mixpanel Dedup + compaction | https://docs.mixpanel.com/reference/event-deduplication | Four-tuple `event, distinct_id, time, $insert_id` at query time. Official docs say **most recent** event in reports but do not guarantee upsert; raw export can preserve duplicates. The mock keeps the latest event for each identical four-tuple when computing totals. |
+| Mixpanel Track Events | https://docs.mixpanel.com/reference/track-event | `/track` is distinct from historical `/import`. Not used by the mock. |
 | Google Play Orders GET | https://developers.google.com/android-publisher/api-ref/rest/v3/orders/get | Known `packageName/orderId`; `Money.units` string + `nanos`. No Google API accessed. |
 | Google Play Orders batchget | https://developers.google.com/android-publisher/api-ref/rest/v3/orders/batchget | 1–1,000 known order IDs, not `orders.list`. |
 | Google Play Money | https://developers.google.com/android-publisher/api-ref/rest/v3/Money | `{currencyCode,units,nanos}` exact decimal handling. |
@@ -48,11 +50,11 @@ This index is **documentation-only**. The mock harness never makes third-party A
 
 ## Local mapping conventions
 
-- Only the first three provider families (**Adapty**, **Mixpanel**, our **Reconcile** service) are **active stateful local API mocks** in `reconcile_mock.py`.
+- Only **Adapty**, **Mixpanel** and the Reconcile analytics API itself are **active, stateful local mocks** in `reconcile_mock.py`.
 - Google, Apple, Stripe, Amplitude, AppsFlyer, PostHog, RevenueCat, Superwall, Apphud and Qonversion are **reference payloads** in `reference/`. They document future parser contracts but are **not** active server adapters and should not be shown as if they were.
 - For provider samples, preserve original field names inside provider-shaped JSON. `manifest`/`metadata` annotate our fixture provenance separately; never inject fake `is_mock` keys into provider payloads and call the result native.
 - Distinguish `store_transaction_id` (Adapty S2S), `event_properties.transaction_id` (Adapty webhook), Google `orderId`, Apple `transactionId`, Stripe `ch_*`, Mixpanel `$insert_id` (delivery dedup identity), and `original_transaction_id` (subscription chain). Do not alias these without explicit mapping.
 - `profile.total_revenue_usd` is an aggregate. It is **not** a transaction-level price authority; the mock event log is the synthetic source ledger.
 - Keep purchase/refund and delivery identities different; a repeated HTTP request is not necessarily a duplicate economic event.
-- Dollar and euro aggregates remain separate in P0. No invented FX conversion of the headline `+21.97 USD / +989.01 EUR`.
-- We do **not** call any real provider or service from the mock code; full local read/write roundtrip is at `127.0.0.1:8765` only.
+- Dollar and euro totals stay separate. The starting gap of `+21.97 USD / +989.01 EUR` is never converted to one currency.
+- `reconcile_mock.py` calls no real provider or service; the whole read and write round trip is local (port 8765 when run with `npm run start:legacy`).

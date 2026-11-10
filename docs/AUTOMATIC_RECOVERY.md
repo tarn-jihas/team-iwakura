@@ -84,9 +84,14 @@ episode for the same observed purchase.
 Reproduce from the repository root:
 
 ```sh
-python3 reconcile-mock-first-kit/benchmark_sdk.py --events 500 \
-  --output .artifacts/sdk-overhead.json
+npm run benchmark:sdk
 ```
+
+This runs `python3 reconcile-mock-first-kit/benchmark_sdk.py` with its default
+of 500 events and prints the result as JSON. To keep a copy, add an output
+file, for example `npm run benchmark:sdk -- --output .artifacts/sdk-benchmark.json`.
+`.artifacts/` is git-ignored, so the file stays on your machine; the measured
+numbers below are the committed record.
 
 Measured on macOS arm64 with Python 3.13.13 on 2026-11-08, using 500 schema-v2
 processing receipts per profile and the real durable SQLite outbox. The paired
@@ -111,7 +116,6 @@ The outage sample uses an injected failing transport; enqueue never invokes it.
 The delivery measurement uses actual loopback HTTP with signed events and checked
 acknowledgement hashes.
 The outage check retains all 500 events after 25 bounded failed delivery attempts.
-Machine-readable evidence: `.artifacts/fulfillment-sdk-benchmark.json`.
 SQLite contention can increase enqueue latency; the SDK has a 200 ms DB timeout
 and records dropped telemetry instead of failing a purchase/gate.
 
@@ -159,9 +163,11 @@ repair write when the original commit already succeeded.
 
 ## Verification and operating limits
 
-Final suites pass **253 tests: 52 JavaScript, 163 Python, 9 HTTP integration and
-29 black-box acceptance**, including a fresh source read paused for seven
-seconds. Acceptance completed in 984.409 seconds. The harness uses public HTTP
+At the time of the measured run, the suites passed **253 tests: 52 JavaScript,
+163 Python, 9 HTTP integration and 29 black-box acceptance**, including a fresh
+source read paused for seven seconds. Acceptance completed in 984.409 seconds.
+The suites have grown since then, so `npm test` and `npm run test:integration`
+now report higher counts. The harness uses public HTTP
 and independent fixtures; it does not import the engine or read its database.
 
 The final stress run completed **1,001 continuous recovery cycles in 50 isolated
@@ -182,7 +188,7 @@ distinct repaired incidents in the complete export. Restart, actual gates and
 cross-page exports were checked through public HTTP. These accelerated local
 fixture measurements do not establish production throughput or Adapty HTTP cost.
 
-The independent Sol Max review closed episode-ownership races, restart/preflight,
+An independent AI review closed episode-ownership races, restart/preflight,
 immutable receipt association, bounded simulation resume and nullable-v2 DTO
 issues. Snapshot-backed traces also preserve fast failure/recovery evidence
 before an audit tick; late receipts use exact processing identity and gate
@@ -198,8 +204,8 @@ new episodes. The retained standalone automatic harness also passed the original
 Actual Adapty replay verified 100 current seeded rights, 76 normal handler
 applications and 24 actual local failures in one incident: 23 gates restored and
 one unresolved. Restart preserved that result; two later incidents on other
-accounts also recovered. Desktop at 1280px and 390px, keyboard Start/Stop, trace
-details and both downloaded exports passed. The `[2026-11-08, 2026-11-09)` UTC
+accounts also recovered. Browser checks at 1280px and 390px, keyboard operation
+of the Run/Stop control, trace details and both downloaded exports passed. The `[2026-11-08, 2026-11-09)` UTC
 export contains all three
 incidents while the UI shows only the one needing attention. See
 [the connected demo guide](LIVE_ADAPTY_DEMO.md).
@@ -210,18 +216,19 @@ in 482 seconds. Generation stops at the 512 MiB engine DB/WAL threshold;
 history is never automatically erased. The final 1,000-cycle test uses fifty
 isolated 20-cycle batches with at most four concurrent, preserving history and
 measuring each runtime independently. The separate long-history checkpoint
-retains its complete assertions and artifact. This does not prove 1,000 incidents
+retains its complete assertions. This does not prove 1,000 incidents
 fit in one DB. Five-millisecond test polling was reduced to 50 ms to avoid
 overloading the local HTTP monitor.
 The four-runtime limit follows the measured 10-core host and roughly 300 MiB
 combined RSS per completed 20-cycle runtime; source fixtures remain isolated.
 Source cooldown and the 60-second full-source cadence remain unscaled.
 
-Evidence: `.artifacts/fulfillment-{regression,integration,acceptance}-final.log`,
-`fulfillment-live-tip.json` (current replay), `fulfillment-live-final.json`
-(earlier restart/browser proof), `fulfillment-stress.json`, the paired SDK benchmark,
-and browser CSV/JSON/screenshots. Stress source counters belong to local synthetic
-fixtures. The real replay observed 299 physical Adapty requests during its interval,
+The logs, result files, exports and screenshots behind these numbers were
+written locally by the test, stress, benchmark and replay commands; they are not
+committed to the repository. Re-run `npm test`, `npm run test:integration`,
+`npm run test:acceptance` and `npm run benchmark:sdk` to reproduce the local
+measurements. Stress source counters belong to local synthetic fixtures. The
+real replay observed 299 physical Adapty requests during its interval,
 including background passes; that is not a universal marginal cost per incident.
 
 ## Next improvements, ranked

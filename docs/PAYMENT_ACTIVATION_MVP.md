@@ -1,48 +1,54 @@
 # Reconcile Payment Activation Recovery
 
-Predlog pivota zasnovan na proveri javne dokumentacije 7. novembra 2026.
-Ovo je izvorna istraživačka specifikacija, ne opis live konektora. Lokalna mock
-implementacija i stvarni rezultati ove iteracije opisani su u
-[verifikacionom izveštaju](ACTIVATION_VERIFICATION.md); aktuelni ugovori su u
-[recovery API dokumentu](RECOVERY_API.md).
+_This is the original research specification, kept for design background; it does not describe a live connector._
 
-Reconcile pronalazi potvrđene kupovine za koje nedostaje očekivana aktivacija,
-grupiše pogođene korisnike, vodi odobren oporavak kroz podržane Adapty operacije
-i proverava ishod u aplikaciji. Ciljni korisnik je tim koji koristi Adapty uz
-web/mobile kupovine i sopstveni backend. Proizvod se sastoji od server konektora,
-engine-a i UI-ja; opciona mobilna instrumentacija dopunjuje dokaze.
+This pivot proposal is based on a review of public documentation on
+November 7, 2026. The local mock implementation and its actual results are
+described in the [verification report](VERIFICATION.md); the current contracts
+are in the [recovery API document](RECOVERY_API.md).
 
-## Zašto ovaj pivot
+Reconcile finds confirmed purchases for which the expected activation is missing,
+groups the affected users, carries out an approved recovery through supported
+Adapty operations and verifies the outcome in the application. The target user is a team
+that uses Adapty alongside web/mobile purchases and its own backend. The product
+consists of a server connector, an engine and a UI; optional mobile
+instrumentation supplements the evidence.
 
-Postojeći kod na reviziji `12fad97` demonstrira aktivno izvorno pravo, pogrešnu
-klijentsku projekciju, odobren resync i stvarni Lumen gate. To je poslednja deonica
-oporavka. Ne demonstrira nezavisnu potvrdu naplate niti kupovinu koja nedostaje
-u Adapty-ju. Postojeći collector HMAC potvrđuje poreklo poruke našeg konektora;
-ne potvrđuje da je payment provider naplatio kupovinu.
+## Why this pivot
 
-Dokumentovan primer za novi glavni scenario: novi Stripe `price_id` nema
-odgovarajući par `product_id` + `price_id` u Adapty katalogu. Stripe može da
-prijavi isporučen webhook, a transakcija izostaje. [Adapty store sync](https://adapty.io/docs/store-sync).
+The code that existed before this pivot (the cancellation demo) demonstrates an
+active source entitlement, an incorrect client projection, an approved resync
+and the actual Lumen gate. That is the last leg of recovery. It does not
+demonstrate independent confirmation of a charge, nor a purchase that is
+missing in Adapty. The existing
+collector HMAC confirms that a message originates from our connector; it does not
+confirm that the payment provider charged for the purchase.
 
-To je osnova za hipotezu o proizvodu, ne dokaz koliko se incident često dešava.
-Predložena vrednost za Adapty: objedinjena dijagnostika, obuhvat incidenta i
-proverljiv oporavak preko njihovih postojećih mehanizama. Potrebno je potvrditi
-sa njihovim timom šta već postoji interno i koliko podrške takvi slučajevi troše.
+A documented example for the new main scenario: a new Stripe `price_id` has no
+matching `product_id` + `price_id` pair in the Adapty catalog. Stripe can report
+a delivered webhook while the transaction is missing. [Adapty store sync](https://adapty.io/docs/store-sync).
 
-## Tri nezavisna stanja
+That is the basis for a product hypothesis, not proof of how often the incident
+occurs. The proposed value for Adapty: unified diagnostics, incident scope and
+verifiable recovery through their existing mechanisms. We need to confirm with
+their team what already exists internally and how much support effort such cases
+consume.
 
-1. **Provider evidence:** kupovina, identitet, proizvod, period, status i izvor
-   potvrde; trenutni refund/revocation podaci kada ih adapter podržava.
-2. **Adapty state:** poznati profil, kupovina i odgovarajuće trenutno pravo.
-3. **Client state:** lokalna projekcija/cache i odluka stvarnog feature gate-a.
+## Three independent states
 
-Profil se čita za poznatog customer/profile ID-ja; sam Get profile nije inventar
-svih kupovina. [Adapty Get profile](https://adapty.io/docs/api-adapty/operations/getProfile).
-Obuhvat skena je unija poznatih klijentskih naloga i dostupnih provider zapisa.
-Provider kupovina bez poznatog vlasnika ostaje orphan dokaz, nikada automatski
-pripisana nalogu po sličnom emailu. UI prikazuje coverage i rupe u izvorima.
+1. **Provider evidence:** purchase, identity, product, period, status and source
+   of confirmation; current refund/revocation data when the adapter supports it.
+2. **Adapty state:** the known profile, the purchase and the corresponding current entitlement.
+3. **Client state:** the local projection/cache and the decision of the actual feature gate.
 
-Minimalni normalizovani dokaz:
+A profile is read for a known customer/profile ID; Get profile alone is not an
+inventory of all purchases. [Adapty Get profile](https://adapty.io/docs/api-adapty/operations/getProfile).
+The scan scope is the union of known client accounts and available provider records.
+A provider purchase without a known owner remains orphan evidence; it is never
+automatically attributed to an account because of a similar email. The UI shows
+coverage and gaps in the sources.
+
+Minimal normalized evidence:
 
 ```text
 tenant/app/environment/provider
@@ -54,22 +60,24 @@ amount_minor/currency/refund_or_revocation_state
 occurred_at/observed_at/evidence_ref/evidence_hash
 ```
 
-`access_basis` razlikuje plaćeni period, trial, grace i ručnu dodelu. Nepodržano
-stanje ostaje unknown. Ne svoditi sve providere na `paid=true`. Invoice bez
-pozitivnog iznosa ili dokaz samo iz aplikacije ne prikazivati kao novu naplatu.
-Stripe za standardni subscription tok opisuje `invoice.paid` uz aktivan
-subscription; dodatno se proverava aktuelni period i policy.
+`access_basis` distinguishes a paid period, trial, grace and a manual grant. An
+unsupported state remains unknown. Do not reduce every provider to `paid=true`.
+Do not present an invoice without a positive amount, or evidence that comes only
+from the application, as a new charge.
+For the standard subscription flow, Stripe describes `invoice.paid` together
+with an active subscription; the current period and the policy are checked in addition.
 [Stripe subscription webhooks](https://docs.stripe.com/billing/subscriptions/webhooks).
 
-## Integracija i granice
+## Integration and boundaries
 
-Server konektor drži provider credentials i purchase tokene van browsera i
-mobilnog SDK-a. Ne prikuplja PAN/CVV niti checkout forme. UI dobija reference i
-redigovane dokaze, ne autentikacione tajne. Event journal je dodatni trag;
-potrebni su i nezavisni provider readback/backfill kako propušten webhook ne bi
-sakrio upravo kupovinu koju tražimo. Obnova se proverava i dok aplikacija ne radi.
+The server connector keeps provider credentials and purchase tokens out of the
+browser and the mobile SDK. It does not collect PAN/CVV or checkout forms. The UI
+receives references and redacted evidence, not authentication secrets. The event
+journal is an additional trail; independent provider readback/backfill is also
+needed so that a missed webhook does not hide exactly the purchase we are looking
+for. Renewals are checked even while the application is not running.
 
-Klijent implementira mali eksplicitni ugovor:
+The client implements a small explicit contract:
 
 ```text
 listAccounts(cursor)
@@ -78,140 +86,162 @@ probeAccess(account, feature)
 resyncAccess(account, expectedRevision, desiredEntitlementHash, operationKey)
 ```
 
-Probe prolazi istu autorizacionu putanju kao korisnik, u njegovom kontekstu,
-bez trošenja kredita ili izvršavanja skupe funkcije. Potvrđuje pristup toj funkciji,
-ne garantuje kvalitet ili uspeh celog servisa. Ako aplikacija nema backend gate,
-koristi se potvrda sa uređaja i jasno odvojen status; server ne glumi dokaz uređaja.
+The probe goes through the same authorization path as the user, in the user's
+context, without spending credits or executing an expensive function. It confirms
+access to that feature; it does not guarantee the quality or success of the whole
+service. If the application has no backend gate, a confirmation from the device
+is used with a clearly separate status; the server does not impersonate device evidence.
 
-Mobilni sloj može prijaviti reference transakcije, promenu profila i odbijen
-pristup. Njegovo `purchase_succeeded` je signal za proveru, ne finansijska potvrda.
-Apple zahteva poznat transaction identifikator, a Google purchase token za
-pojedinačno čitanje. Zato obećanje „vidimo sve kupovine u svakoj aplikaciji bez
-integracije“ nije izvodljivo. [Apple API](https://developer.apple.com/documentation/appstoreserverapi),
+The mobile layer can report transaction references, a profile change and denied
+access. Its `purchase_succeeded` event is a prompt to verify, not a financial
+confirmation.
+Apple requires a known transaction identifier, and Google a purchase token, for
+an individual read. That is why the promise "we see all purchases in every
+application without integration" cannot be kept. [Apple API](https://developer.apple.com/documentation/appstoreserverapi),
 [Google lifecycle](https://developer.android.com/google/play/billing/lifecycle/subscriptions).
 
-## Mogućnosti po provideru
+## Capabilities by provider
 
-| Provider | Dokaz | Podržan pravac oporavka | MVP demonstracija |
+| Provider | Evidence | Supported recovery path | MVP demonstration |
 | --- | --- | --- | --- |
-| Stripe | Povezan paid invoice/subscription i aktuelno stanje | Ispravna konfiguracija, Validate Stripe purchase, svež profil | Kompletan mock tok za 100 naloga |
-| Paddle | Potvrđena transakcija/subscription i aktuelno stanje | Validate Paddle purchase posle ispravnih preduslova | Mali kompletan mock scenario |
-| Apple | Verifikovana transakcija/status za poznat ID | Ispravka konfiguracije, dokumentovani SDK retry/restore kada je primenljiv | Dijagnoza i eksplicitno čekanje potrebnog app/operator koraka |
-| Google Play | Token + subscriptionsv2 readback | Odgovarajući SDK restore/sync tok za identifikovan profil | Dijagnoza i čekanje potrebnog app/operator koraka |
-| Custom store | Provider-verifikovan zapis sa dokumentovanim lifecycle pravilima | Set transaction za konfigurisani custom store | Jedan ograničen mock ugovor, bez tvrdnje o svim providerima |
+| Stripe | Linked paid invoice/subscription and current state | Correct configuration, Validate Stripe purchase, fresh profile | Complete mock flow for 100 accounts |
+| Paddle | Confirmed transaction/subscription and current state | Validate Paddle purchase once the prerequisites are correct | Small complete mock scenario |
+| Apple | Verified transaction/status for a known ID | Configuration fix, documented SDK retry/restore when applicable | Diagnosis and explicit waiting for the required app/operator step |
+| Google Play | Token + subscriptionsv2 readback | The appropriate SDK restore/sync flow for an identified profile | Diagnosis and waiting for the required app/operator step |
+| Custom store | Provider-verified record with documented lifecycle rules | Set transaction for the configured custom store | One limited mock contract, with no claim about all providers |
 
-Stripe validacija koristi `POST /api/v1/sdk/purchase/stripe/token/validate/`,
-sa `customer_user_id` i `sub_...` ili `pi_...` tokenom. Validna kupovina može
-uvesti istoriju i napraviti profil; uvoz generiše događaje i ulazi u MTR, pa nije
-bezazlen GET. [Validate Stripe purchase](https://adapty.io/docs/api-adapty/operations/validateStripePurchase).
+Stripe validation uses `POST /api/v1/sdk/purchase/stripe/token/validate/`,
+with `customer_user_id` and a `sub_...` or `pi_...` token. A valid purchase can
+import history and create a profile; the import generates events and counts
+toward MTR, so it is not a harmless GET. [Validate Stripe purchase](https://adapty.io/docs/api-adapty/operations/validateStripePurchase).
 
-Paddle ima zaseban v2 endpoint i drugačiji payload; prihvata transaction ili
-subscription token. [Validate Paddle purchase](https://adapty.io/docs/api-adapty/operations/validatePaddlePurchase).
-Custom Set transaction je unos već potvrđenog zapisa, ne nezavisna provera
-naplate. Ne koristiti ga kao prečicu za Apple/Google.
+Paddle has a separate v2 endpoint and a different payload; it accepts a
+transaction or subscription token. [Validate Paddle purchase](https://adapty.io/docs/api-adapty/operations/validatePaddlePurchase).
+The custom-store Set transaction call records an already confirmed purchase; it
+is not an independent verification of a charge. Do not use it as a shortcut for
+Apple/Google.
 [Custom stores](https://adapty.io/docs/custom-store).
 
-Apple dokumentuje izgubljen pristup usled credentials/product konfiguracije i
-SDK ponovne pokušaje. [App Store troubleshooting](https://adapty.io/docs/troubleshoot-app-store-integration).
-Restore može promeniti vlasništvo/deljenje pristupa; prethodno potvrditi profil
-i sharing policy, ne pokretati ga naslepo za ceo cohort.
+Apple documents lost access caused by credentials/product configuration, and
+SDK retries. [App Store troubleshooting](https://adapty.io/docs/troubleshoot-app-store-integration).
+A restore can change ownership/sharing of access; confirm the profile and the
+sharing policy first, and do not run it blindly for the whole cohort.
 [Access sharing](https://adapty.io/docs/sharing-paid-access-between-user-accounts/).
 
-## Pravila detekcije
+## Detection rules
 
-| Zatečeno stanje | Klasifikacija i postupak |
+| Observed state | Classification and action |
 | --- | --- |
-| Potvrđen važeći plaćeni period, identitet pouzdan, očekivano Adapty pravo odsutno | ACTIVATION_MISSING; traži konfiguracione dokaze i podržan recovery |
-| Aktuelno Adapty pravo postoji, klijentski gate odbija zbog subscription/cache stanja | ACCESS_NOT_DELIVERED; koristi postojeći odobreni resync |
-| Nepouzdan identitet, izvor nedostupan/zastareo, nepotpun backfill | INCONCLUSIVE; bez writes |
-| Promena tek nastala, unutar konfigurisanog vremena propagacije | AWAITING_SYNC; ponovna provera, bez preuranjenog incidenta |
-| Pending payment, neaktivan plaćeni period, druga zabrana pristupa | Bez automatskog aktiviranja; tačan razlog i policy |
-| Trial/grace/manual grant sa opravdanim pristupom | Nije dokaz naplate i nije automatski incident |
+| Confirmed valid paid period, identity reliable, expected Adapty entitlement absent | ACTIVATION_MISSING; look for configuration evidence and a supported recovery |
+| Current Adapty entitlement exists, client gate denies because of subscription/cache state | ACCESS_NOT_DELIVERED; use the existing approved resync |
+| Unreliable identity, source unavailable/stale, incomplete backfill | INCONCLUSIVE; no writes |
+| Change occurred only recently, within the configured propagation time | AWAITING_SYNC; re-check, no premature incident |
+| Pending payment, inactive paid period, another access restriction | No automatic activation; exact reason and policy |
+| Trial/grace/manual grant with legitimate access | Not evidence of a charge and not automatically an incident |
 
-Nedostajuća kupovina na jednom profilu sama nije dokaz da je nema globalno:
-proveriti identitet, transfer/sharing i reference dostupne adapteru. Zajednički
-product/price, period i konfiguraciona verzija grupišu sumnjivi obuhvat; svaki
-nalog se zatim individualno proverava. „Potvrđen uzrok“ zahteva katalog/config
-dokaz; bez njega UI kaže „moguć uzrok“. Katalog se čita ili uvozi uz datum/verziju.
+A purchase missing on one profile is not by itself proof that it is missing
+globally: check identity, transfer/sharing and the references available to the
+adapter. A shared product/price, period and configuration version group the
+suspected scope; each account is then checked individually. A "confirmed cause"
+requires catalog/config evidence; without it the UI says "possible cause". The
+catalog is read or imported together with a date/version.
 
-## Plan i izvršavanje
+## Plan and execution
 
-Koraci: detect → preview → approve → preflight → config prerequisite → provider
+Steps: detect → preview → approve → preflight → config prerequisite → provider
 validation → Adapty readback → client resync → client gate verification.
 
-Konfiguraciona promena je zasebna operacija: može uticati i na buduće kupovine
-van izabranih naloga. Trenutni CLI dokumentuje da store/price ID postojećeg
-proizvoda nije izmenljiv; za drugi ID pravi se novi proizvod. Ne izmišljati
-`updatePriceId` API. U MVP-u operator odobrava simuliranu katalog-promenu; buduća
-live verzija bira potvrđen CLI/dashboard workflow uz poseban scope i credentials.
+A configuration change is a separate operation: it can also affect future
+purchases outside the selected accounts. The current CLI documents that the
+store/price ID of an existing product cannot be changed; a new product is created
+for a different ID. Do not invent an `updatePriceId` API. In the MVP the operator
+approves a simulated catalog change; a future live version chooses a confirmed
+CLI/dashboard workflow with a separate scope and credentials.
 [Adapty products CLI](https://adapty.io/docs/developer-cli-products).
 
-Plan sadrži tačan cohort, evidence/config hash, identitet, period, odabranu
-operaciju, policy, TTL i očekivanu lokalnu reviziju. Preflight ponovo čita izvor.
-Timeout spoljne operacije znači unknown outcome: prvo readback, zatim odluka o
-retry-ju. Lokalni operation key nije obećanje da provider podržava exactly-once.
-Čuvati rezultate po koraku; uspešna validacija ne poništava se zato što je
-klijentski cache zakazao. Retry radi samo preostali potrebni korak.
+The plan contains the exact cohort, the evidence/config hash, identity, period,
+the selected operation, policy, TTL and the expected local revision. Preflight
+reads the source again. A timeout of an external operation means an unknown
+outcome: readback first, then a decision about a retry. A local operation key is
+not a promise that the provider supports exactly-once execution.
+Store results per step; a successful validation is not undone because the client
+cache failed. A retry performs only the remaining required step.
 
-Odvojeni rezultati: `activation_verified`, `client_access_verified`,
+Separate results: `activation_verified`, `client_access_verified`,
 `awaiting_client_action`, `blocked_configuration`, `inconclusive`, `unresolved`.
-HTTP200 validacije nije dovoljan za zelen status. Ručni grant nije rekonstrukcija
-plaćene kupovine i ne sme zatvarati activation incident kao oporavljen payment.
+An HTTP 200 from validation is not enough for a green status. A manual grant is
+not a reconstruction of a paid purchase and must not close an activation incident
+as a recovered payment.
 [Manual access grants](https://adapty.io/docs/server-side-api-with-ai).
 
-## Glavni hackathon demo
+## Main hackathon demo
 
-Sve ostaje lokalno i sintetičko. Ovo je NOV scenario; postojeći cancellation
-scenario ostaje regresiona kontrola.
+Everything stays local and synthetic. This is a new scenario; the existing
+cancellation scenario remains as a regression control.
 
-1. Mock provider obradi kupovine 100 naloga kroz lifecycle; 24 aktivna plaćena
-   naloga koriste novi nemapirani price, 60 su zdravi, 6 istekli, 4 policy denial,
-   3 identity unknown, 3 stale/unavailable evidence.
-2. Mock Adapty consumer za novi price ne aktivira pravo. Lumen za kupca vraća 403.
-3. Reconcile iz nezavisnog provider registra nalazi 24 kandidata i proverava
-   individualne dokaze: 100 scope / 94 evaluable / 24 affected / 6 inconclusive.
-4. UI prikazuje plaćenu kupovinu, odsutno Adapty pravo, odsutan katalog mapping
-   i odbijen klijentski gate, sa povezanim dokazima.
-5. Operator odobrava katalog preduslov i validaciju tačno 24 kupovine. Mock
-   validacija koristi dokumentovane preduslove, pa kreira odgovarajuće stanje.
-6. Svež Adapty readback potvrđuje 24 aktivacije. Klijentski resync i gate potvrđuju
-   samo 23: jednom nalogu ostaje stvarno zastareo cache.
-7. Novo odobrenje za preostali cache resync završava 24/24. Ponovno izvršenje
-   prethodnog plana ne uvodi nove transakcije ili licence. Isti Lumen kupac dobija 200.
+1. The mock provider processes the purchases of 100 accounts through the
+   lifecycle; 24 active paid accounts use the new unmapped price, 60 are healthy,
+   6 expired, 4 policy denial, 3 identity unknown, 3 stale/unavailable evidence.
+2. The mock Adapty consumer does not activate the entitlement for the new price.
+   Lumen returns 403 for the customer.
+3. Reconcile finds 24 candidates from the independent provider registry and
+   checks each account's evidence individually: 100 in scope / 94 evaluated /
+   24 affected / 6 inconclusive.
+4. The UI shows the paid purchase, the absent Adapty entitlement, the absent
+   catalog mapping and the denied client gate, with linked evidence.
+5. The operator approves the catalog prerequisite and the validation of exactly
+   24 purchases. Mock validation follows the documented prerequisites and
+   creates the corresponding state.
+6. A fresh Adapty readback confirms 24 activations. The client resync and gate
+   verify only 23: one account is left with a genuinely stale cache.
+7. A new approval for the remaining cache resync finishes at 24/24. Re-executing
+   the previous plan introduces no new transactions or licences. The same Lumen
+   customer gets 200.
 
-24 aktivacije i 23 dostupna gate-a moraju biti odvojeni brojači. Ne koristiti
-„recovered revenue“: novac je već naplaćen. Meriti obnovljene aktivacije/pristupe,
-vreme do oporavka, manual korake, false positives i pokrivenost dokazima.
+The 24 activations and the 23 verified gates must be separate counters. Do not
+use "recovered revenue": the money has already been charged. Measure restored
+activations/accesses, time to recovery, manual steps, false positives and
+evidence coverage.
 
-## Izmene postojećeg projekta
+## Changes to the existing project (original plan)
 
-| Paket | Konkretan posao | Uslov prihvatanja |
+_This section is the work plan as written before implementation, kept for
+reference. It is a completed to-do list, not a description of current status;
+the test count and file names are those of the project at that time. For what
+was built and verified, see the [verification report](VERIFICATION.md) and the
+[recovery API document](RECOVERY_API.md)._
+
+| Package | Concrete work | Acceptance condition |
 | --- | --- | --- |
-| Modeli i simulatori | Dodati nezavisan provider ledger, mock Adapty catalog/profile/validation i provider capability map | Kvar se proizvodi kroz lifecycle; detector ne čita oracle/fault label |
-| Engine | Nadograditi paid_access orchestration sa upstream pravilima i koracima plana | Konfiguracija/identitet/period provereni pre writes; unknown ostaje unknown |
-| Adapter i collector | Zadržati collector_sdk/lumen_app; dodati evidence reference, provider readback i step receipts | Client signal nije dovoljan payment dokaz; tajne van eksportovanih podataka |
-| UI | access-app dobija tri kolone dokaza, capability/status i odvojene brojače | Neaktivirana kupovina može se videti i pre nego što postoji Adapty događaj |
-| Verifikacija | Zadržati postojećih 75 testova i dodati nove acceptance scenarije | Novi 100-account replay plus svi negativni testovi prolaze |
+| Models and simulators | Add an independent provider ledger, a mock Adapty catalog/profile/validation and a provider capability map | The fault is produced through the lifecycle; the detector does not read the oracle/fault label |
+| Engine | Extend paid_access orchestration with upstream rules and plan steps | Configuration/identity/period checked before writes; unknown stays unknown |
+| Adapter and collector | Keep collector_sdk/lumen_app; add evidence references, provider readback and step receipts | A client signal is not sufficient payment evidence; secrets stay out of exported data |
+| UI | access-app gets three evidence columns, capability/status and separate counters | An unactivated purchase can be seen even before an Adapty event exists |
+| Verification | Keep the existing 75 tests and add new acceptance scenarios | The new 100-account replay plus all negative tests pass |
 
-Obavezni novi negativni slučajevi: plaćeno ali pogrešan korisnik; ručni grant bez
-naplate; refund/revocation pre apply; pending/zero-value invoice; trial/grace;
-dupli i van redosleda događaji; validacija timeout posle uspešnog upisa; self-heal
-pre apply; zastareo katalog; source 429/outage; Apple/Google restore čeka uređaj;
-onemogućen gate probe; izostala kupovina iz oba Adapty i client registra ali
-prisutna u provider backfill-u. Alternativni seed menja IDs/cohort. Za negativne
-kontrole očekivati 0 nedozvoljenih writes, a ne veštački isti broj oporavljenih.
+Negative cases the plan required: paid but wrong user; manual grant without a
+charge; refund/revocation before apply; pending/zero-value invoice; trial/grace;
+duplicate and out-of-order events; validation timeout after a successful write;
+self-heal before apply; stale catalog; source 429/outage; Apple/Google restore
+waiting for the device; gate probe disabled; purchase missing from both the
+Adapty and client registries but present in the provider backfill. An alternative
+seed changes the IDs/cohort. For negative controls, expect 0 disallowed writes,
+not an artificially identical number of recovered accounts.
 
-Prioritet: prvo kompletan upstream Stripe scenario i postojeći Lumen završetak;
-zatim mali Paddle/custom tokovi i Apple/Google dijagnostičke kontrole kroz isti
-engine. Sve to su mock adapteri. Live provider integracija i mobilni SDK portovi
-dolaze tek posle sandbox validacije ugovora i razgovora sa Adapty timom.
+Planned priority: first the complete upstream Stripe scenario and the existing Lumen
+final leg; then the small Paddle/custom flows and the Apple/Google diagnostic
+controls through the same engine. All of these are mock adapters. Live provider
+integration and mobile SDK ports come only after sandbox validation of the
+contracts and a conversation with the Adapty team.
 
-## Potvrda vrednosti sa Adapty timom
+## Confirming the value with the Adapty team
 
-Tri konkretna pitanja: koje paid-but-not-activated incidente podrška rešava,
-koji postojeći interni alati ih već detektuju i koje recovery operacije smeju da
-se pokrenu grupno uz odobrenje? Tražiti anonimizovane obrasce slučajeva, ne stvarne
-payment podatke korisnika. Pilot predlog: prvo read-only poređenje potvrđenih
-slučajeva sa zaključkom podrške, zatim sandbox approved recovery. Kriterijumi:
-tačnost detekcije, nijedna nedozvoljena dodela i merljivo manje manual koraka.
-Učestalost problema, komercijalna tražnja i partnerstvo još nisu potvrđeni.
+Three concrete questions: which paid-but-not-activated incidents does support
+resolve, which existing internal tools already detect them, and which recovery
+operations may be run in bulk with approval? Ask for anonymized case patterns,
+not real user payment data. Pilot proposal: first a read-only comparison of
+confirmed cases against support's conclusion, then an approved recovery in a
+sandbox. Criteria: detection accuracy, no unapproved grant and measurably fewer
+manual steps.
+The frequency of the problem, commercial demand and a partnership have not yet
+been confirmed.

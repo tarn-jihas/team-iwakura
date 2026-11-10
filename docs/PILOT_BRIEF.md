@@ -1,72 +1,81 @@
-# Pilot: proverljiv oporavak plaćenog pristupa
+# Pilot: verifiable recovery of paid access
 
-Reconcile je predlog dodatka za Adapty support/integration tim i developere
-aplikacija koje koriste Adapty. Demo dokazuje lokalnu tehničku putanju; spremnost
-kupca da plati još nije potvrđena. Nema dogovorenog partnerstva ili pristupa
-internim Adapty alatima.
+Reconcile is a proposed add-on for the Adapty support/integration team and for
+developers of applications that use Adapty. The demo proves a local technical
+path; customer willingness to pay has not yet been confirmed. There is no agreed
+partnership and no access to internal Adapty tools.
 
-## Problem koji proveravamo
+## The problem we are testing
 
-Adapty može da evidentira važeće pravo, dok aplikacioni backend ne primeni
-projekciju ili ne osveži keš. Brzo potvrđen webhook i njegova uspešna dostava
-ne dokazuju da je naknadna asinhrona obrada uspela:
-[webhook obrada](https://adapty.io/docs/handle-webhooks-with-ai),
+Adapty can record a valid entitlement while the application backend fails to
+apply the projection or refresh its cache. A quickly acknowledged webhook and
+its successful delivery do not prove that the subsequent asynchronous processing
+succeeded:
+[webhook processing](https://adapty.io/docs/handle-webhooks-with-ai),
 [Event Feed](https://adapty.io/docs/event-feed).
-Podrška tada mora da poveže Adapty stanje sa stvarnim stanjem aplikacije.
-Upstream validacija kupovina ostaje odvojena regresija u Demo Lab-u.
+Support then has to connect the Adapty state with the actual application state.
+Upstream purchase validation remains a separate regression scenario in the
+Demo Lab.
 
-Proveravamo da li objedinjena dijagnostika, individualno potvrđen blast radius,
-trajna odluka politike za tačan plan i dokaz stvarnog gate-a skraćuju taj posao.
-Automatski resync obnavlja samo već postojeće, nezavisno potvrđeno pravo.
-Ne prodajemo novu naplatu
-niti već naplaćen iznos nazivamo recovered revenue. Generička outage zaštita nije
-dovoljna razlika: [RevenueCat reliability](https://www.revenuecat.com/feature/reliability)
-već opisuje privremena prava i naknadno usklađivanje.
+We are testing whether unified diagnostics, an individually confirmed blast
+radius, a durable policy decision for an exact plan and verification at the
+actual gate shorten that work. Automatic resync restores only an existing,
+independently confirmed entitlement. We are not selling a new charge, and we do
+not describe an amount that was already charged as recovered revenue. Generic
+outage protection is not enough of a differentiator:
+[RevenueCat reliability](https://www.revenuecat.com/feature/reliability)
+already describes temporary entitlements and later reconciliation.
 
-## Prvi razgovor sa Adapty timom
+## First conversation with the Adapty team
 
-1. Koje vrste recorded-but-not-fulfilled incidenata se ponavljaju i koliko istraga
-   zahtevaju? Tražimo anonimizovane primere i agregate, bez payment tajni.
-2. Šta već detektuju interni alati? Gde zaista ostaje ručni posao između
-   referenci kupovine, Adapty profila i klijentskog backend-a?
-3. Koje recovery operacije smeju grupno da se izvršavaju, ko ih odobrava i kako
-   proveriti identitet, refund, važenje perioda i promenjenu konfiguraciju?
-4. Ko bi bio vlasnik integracije i kupac: Adapty, developer aplikacije ili oba?
-   Da li su spremni da ulože vreme u pilot i po kom merljivom ishodu bi ga kupili?
+1. Which kinds of recorded-but-not-fulfilled incidents recur, and how much
+   investigation do they require? We are asking for anonymized examples and
+   aggregates, without payment secrets.
+2. What do internal tools already detect? Where does manual work actually
+   remain between purchase references, the Adapty profile and the client
+   backend?
+3. Which recovery operations may be executed in bulk, who approves them, and how
+   should identity, refunds, period validity and changed configuration be
+   checked?
+4. Who would own the integration, and who would be the buyer: Adapty, the
+   application developer, or both? Are they willing to invest time in a pilot,
+   and what measurable outcome would make them buy?
 
-## Predloženi pilot i merila
+## Proposed pilot and metrics
 
-Prva faza je read-only replay istorijskih, anonimizovanih slučajeva. Tim unapred
-beleži očekivani obuhvat i zaključak; Reconcile dobija samo operativne izvore.
-Poređenje sa podrškom razlikuje potvrđene slučajeve, netačne alarme i nedovoljnu
-evidenciju. Tek zatim sledi sandbox recovery uz eksplicitno odobrenje i stvarni
-klijentski probe.
+The first phase is a read-only replay of historical, anonymized cases. The team
+records the expected scope and conclusion in advance; Reconcile receives only
+the operational sources. The comparison with support's conclusions separates
+confirmed cases, false alarms and cases with insufficient evidence. Only then
+does sandbox recovery follow, with explicit approval and an actual client gate
+probe.
 
-| Mera | Kako je beležimo | Predlog kriterijuma za pilot |
+| Metric | How we record it | Proposed pilot criterion |
 | --- | --- | --- |
-| Neodobrene ili pogrešne dodele | Uporediti svaku akciju sa identitetom, periodom i odobrenim planom | Nula; svaki nalaz zaustavlja write deo |
-| Tačnost potvrđenog obuhvata | Nezavisno označeni slučajevi naspram potvrđenih naloga | Dogovoriti cilj pre pilota; objaviti i propuštene slučajeve |
-| Nepotpuna evidencija | Broj i razlog inconclusive naloga, nedostajući izvori | Nijedan takav nalog ne dobija automatski repair |
-| Vreme do dijagnoze | Od prvog signala do objašnjenja i individualno potvrđenog obuhvata | Uporediti medijanu i najsporije slučajeve sa ručnim postupkom |
-| Vreme do oporavka | Od odluke politike do svežeg Adapty readback-a i client probe-a | Meriti isporuku pristupa, bez tvrdnje o novoj naplati |
-| Ručni koraci | Radnje operatora po incidentu i nalogu | Merljivo smanjenje bez skrivanja potrebne kontrole |
-| Integracioni napor | Sati za izvore, identitet, adapter i gate probe | Dogovoriti prihvatljiv budžet sa developerom |
-| Spremnost za kupovinu | Imenovan vlasnik budžeta i konkretan sledeći komercijalni korak | Obaveza za plaćeni pilot ili jasan uslov za njega |
+| Unapproved or incorrect grants | Compare every action with the identity, period and approved plan | Zero; any finding stops the write phase |
+| Accuracy of the confirmed scope | Independently labelled cases versus confirmed accounts | Agree on a target before the pilot; also report missed cases |
+| Incomplete evidence | Number of inconclusive accounts and missing sources, with the reason for each | No such account receives an automatic repair |
+| Time to diagnosis | From the first signal to an explanation and an individually confirmed scope | Compare the median and the slowest cases with the manual procedure |
+| Time to recovery | From the policy decision to a fresh Adapty readback and client gate probe | Measure access delivery, with no claim of a new charge |
+| Manual steps | Operator actions per incident and per account | A measurable reduction without removing necessary controls |
+| Integration effort | Hours for sources, identity, adapter and gate probe | Agree on an acceptable budget with the developer |
+| Willingness to pay | A named budget owner and a concrete next commercial step | A commitment to a paid pilot or a clear condition for one |
 
-Ovo su predložena merila, ne već ostvareni poslovni rezultati. Pragove ne
-prilagođavamo naknadno da bi demo izgledao uspešno.
+These are proposed metrics, not business results already achieved. We do not
+adjust thresholds after the fact to make the demo look successful.
 
-## Odgovornost i granice
+## Responsibility and limits
 
-Payment provider potvrđuje naplatu; Adapty upravlja svojim profilom/pravom;
-developer poseduje identitet, klijentsku projekciju i gate. Reconcile čuva
-evidenciju, klasifikuje, predlaže, izvršava samo odobreni scope i proverava ishod.
-Uska odobrena politika može automatski da autorizuje konkretan plan; operator
-određuje dozvoljeni scope. Nejasno vlasništvo transakcije blokira writes.
+The payment provider confirms the charge; Adapty manages its own profile and
+entitlement; the developer owns identity, the client projection and the gate.
+Reconcile keeps the evidence, classifies accounts, proposes a plan, executes
+only the approved scope and verifies the outcome. A narrow approved policy can
+automatically authorize a specific plan; the operator determines the permitted
+scope. Unclear transaction ownership blocks writes.
 
-Pre live faze treba potvrditi sandbox ugovore, credential isolation, retention,
-rate limits, mrežne timeout-e, operativno praćenje i on-call odgovornost. Native
-mobilne biblioteke dolaze posle toga. Aktuelna iteracija koristi stvarna Adapty
-očitavanja zvaničnih sintetičkih seed zapisa, odvojeni lokalni Lumen backend,
-izvršivi Python server SDK i mobilni ugovor/simulator. Ona ne dokazuje priliv
-novca, prikaz mobilnog UI-ja ili tržišnu jedinstvenost.
+Before a live phase, we need to confirm sandbox contracts, credential
+isolation, retention, rate limits, network timeouts, operational monitoring and
+on-call responsibility. Native mobile libraries come after that. The current iteration
+uses real Adapty reads of official synthetic seed records, a separate local
+Lumen backend, an executable Python server SDK and a mobile contract/simulator.
+It does not prove money received, mobile UI rendering or market uniqueness.

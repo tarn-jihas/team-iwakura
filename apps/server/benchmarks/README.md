@@ -1,6 +1,29 @@
-# Recovery-cycle stress harness
+# Benchmarks
 
-Run this separately from `sdk-overhead.mjs` after building the TypeScript workspaces:
+Local measurements for the TypeScript runtime. Build first (`npm ci && npm run build:ts`
+at the repository root) and run the scripts from the root. Each prints a JSON report,
+uses fresh temporary SQLite databases and loopback ports, and contacts no remote endpoint.
+
+| Script | Purpose |
+| --- | --- |
+| `sdk-overhead.mjs` | SDK and collector overhead only. |
+| `recovery-cycle-stress.mjs` | End-to-end recovery cycles across the provider, Lumen and engine modules. |
+| `rss-probe.mjs` | Helper, not run directly. The stress harness preloads it into the provider and Lumen processes so they report their memory use. |
+
+Recorded results are in [`docs/VERIFICATION.md`](../../../docs/VERIFICATION.md).
+
+## SDK overhead
+
+```sh
+node apps/server/benchmarks/sdk-overhead.mjs [--events 1000]
+```
+
+Emits events through `@reconcile/server-sdk` to a local collector, once with plain events
+and once with traces enabled. `--events` accepts 1,000 to 10,000. The report covers payload
+and HTTP body sizes, accepted, queued, dropped and retried counts, flush time, event-loop
+delay, process memory and SQLite storage size. It is not a production performance guarantee.
+
+## Recovery-cycle stress
 
 ```sh
 node apps/server/benchmarks/recovery-cycle-stress.mjs

@@ -1,101 +1,170 @@
-# Reconcile: FULL MOCK FIRST seed and replay
+# Python runtime
 
-**No Adapty, Mixpanel, Apple, Google Play, Stripe, Amplitude, AppsFlyer, PostHog, RevenueCat, Superwall, Apphud or Qonversion service is contacted, even in test or sandbox.** Zero third-party credentials required. Python 3.9+ standard library only. Optional HTTP binds `127.0.0.1` and uses native-looking mock paths, never provider domains.
+This directory is the complete Python runtime behind the main Reconcile demo.
+`npm start` at the repository root launches it: three local processes (a
+subscription provider, the sample app "Lumen", and the Reconcile engine), each
+with its own SQLite database, plus the browser UI served from
+[`../Reconcile/dist`](../Reconcile/README.md).
 
-This package is a standalone proof-of-behaviour and mock data source for the Reconcile website UI. It **does not modify the supplied static website** and it does not claim that Vuk's unshared `flow.py` or existing browser UI has been integrated. The mock contract can be used by an agent wiring the UI.
+It needs Python 3.13.13 and uses only the standard library. Every service binds
+`127.0.0.1`. In mock mode nothing leaves the machine. In live mode the provider
+process reads profiles from the Adapty API (`api.adapty.io`) and never writes to
+it; recovery only changes local Lumen state. See the
+[root README](../README.md) for the product overview and
+[the live setup guide](../docs/LIVE_ADAPTY_DEMO.md) for the connected demo.
 
-## Exact fast-start
+The directory name is historical: it began as a mock of an analytics
+reconciliation flow. That first mock is still here and still served; see
+[Legacy analytics mock](#legacy-analytics-mock).
 
-```sh
-cd reconcile-mock-first-kit
-python3 reconcile_mock.py seed
-python3 reconcile_mock.py report
-python3 reconcile_mock.py check
-```
+## How it is started
 
-`check` starts a clean seed, tests the entire flow, and leaves the final mock state. Run `python3 reconcile_mock.py seed` again to restore the before state.
+All commands run from the repository root. Arguments after `--` are passed to
+the Python script.
 
-To run the stateful **mock** API for the UI:
-
-```sh
-python3 reconcile_mock.py seed
-python3 reconcile_mock.py serve --port 8765
-# Open a second terminal; every URL below is 127.0.0.1, no remote service:
-curl -sS 'http://127.0.0.1:8765/api/report?run=mock-run-20261107'
-curl -sS 'http://127.0.0.1:8765/api/preview'
-curl -sS -H 'Content-Type: application/json' -d '{"run":"mock-run-20261107","ids":["MISSING_IN_MIXPANEL","PRICE_MISMATCH","DUPLICATE_IN_MIXPANEL"],"actor":"demo-operator"}' 'http://127.0.0.1:8765/api/approve'
-curl -sS -H 'Content-Type: application/json' -d '{"event":"premium_paid_v2","cls":"purchase","actor":"demo-operator"}' 'http://127.0.0.1:8765/api/map'
-curl -sS -H 'Content-Type: application/json' -d '{"run":"mock-run-20261107","ids":["MISSING_IN_MIXPANEL","PRICE_MISMATCH","DUPLICATE_IN_MIXPANEL"]}' 'http://127.0.0.1:8765/api/apply'
-# The mock export deliberately lags one deterministic tick:
-curl -sS -H 'Content-Type: application/json' -d '{"ticks":1}' 'http://127.0.0.1:8765/api/advance-clock'
-curl -sS 'http://127.0.0.1:8765/api/verify'
-curl -sS 'http://127.0.0.1:8765/api/audit'
-```
-
-The GET `/api/report` JSON contains groups and findings, `delta` as decimal strings, evidence, group hashes and per-currency gap. `POST /api/approve` is a **separate required step** before `POST /api/apply`. The server re-runs detection, checks the stored approval hash, creates an event only for outstanding approved findings, and records a receipt. `GET /api/verify` reads the resulting mock destination after `POST /api/advance-clock`. A repeated `apply` is a no-op.
-
-**No API URL from `docs/API_SOURCES.md` should ever be pasted into runnable code in this mock environment.** That file is a documentation index.
-
-## Deterministic seed and expected findings
-
-The command `python3 reconcile_mock.py seed` overwrites only `runtime/state.json` and `_evaluation/oracle.json` under this unpacked package. No internet, API key, .env or external subprocess is involved. It uses run ID `mock-run-20261107`, fixed UTC `2026-11-07T09:00:00Z`, synthetic app `mock-lumen`, synthetic EU project `mock-mixpanel-eu` and predictable `uuid5` event IDs. The server **never reads the `_evaluation` oracle**. It operates on the state and raw events only.
-
-- `u00001` missing USD purchase `+9.99`: source positive, destination absent -> gap contribution **-9.99 USD**.
-- `u00002` missing USD full refund `-6.99`: source has purchase and refund; destination only purchase -> **+6.99 USD**.
-- `u00003` duplicate USD `+12.99`: destination has two **distinct** `$insert_id`s -> **+12.99 USD**.
-- `u00004` wrong EUR price: source `9.99 EUR`, destination `999 EUR` -> **+989.01 EUR**.
-- `u00005` renamed purchase: source `14.99 EUR`, destination `premium_paid_v2`; unknown mapping -> **UNMAPPED_EVENT_NAME**, no missing backfill.
-- `u00006/u00007` healthy USD/EUR controls, no findings.
-- `u00008` source Sandbox purchase `4.99 USD`, deliberately absent from production analytics -> **SANDBOX_EXPECTED**, no repair.
-- `u00009` ghost purchase `11.98 USD` only in destination -> **EXTRA_IN_MIXPANEL**, manual investigation only.
-
-**Before:** `gap = {"USD":"21.97", "EUR":"989.01"}`, six finding groups, seven individual findings. Source total/destination total are separate by currency. Here `gap = destination - source` under our explicit revenue definition.
-
-**Actions:** approve 3 write groups (`MISSING_IN_MIXPANEL`, `PRICE_MISMATCH`, `DUPLICATE_IN_MIXPANEL`) plus accept one local mapping (`premium_paid_v2 -> purchase`). These produce **4 synthetic destination writes** because MISSING has two individual findings. PRICE and DUPLICATE each add a **separate signed** `reconcile_correction`; neither mutates the original event. Both corrections are included in the **explicit mock effective revenue metric**. Mapping does not write a provider event.
-
-**Immediately after accepted import:** the report is unchanged (mock destination visibility delay). After advancing one mock tick: **`gap = {"USD":"11.98", "EUR":"0.00"}`**. Only ghost (unresolved) and sandbox (expected) remain. A second `POST /api/apply` has zero writes. To restart the demonstration, run `seed` again.
-
-## Local API routes (all mocks)
-
-| Local route | Purpose | What it resembles |
+| Command | Runs | Notes |
 | --- | --- | --- |
-| `GET /mock/adapty/api/v2/server-side-api/profile/?customer_user_id=u00004` | Current synthetic profile/entitlement, **not per-transaction price** | Adapty S2S GET profile |
-| `GET /mock/adapty/events/export` | Newline-delimited synthetic webhook events, the true local price ledger | Adapty webhook/S3 event projection |
-| `GET /mock/mixpanel/api/2.0/export` | Synthetic raw destination JSONL, including physical duplicates | Mixpanel raw export |
-| `POST /mock/mixpanel/import?region=eu` | Stores synthetic event array, visible one tick later | Mixpanel import API |
-| `POST /mock/mixpanel/import?region=us` | Artificial transport 200 but zero persistence, **negative test** | Model of wrong-residency delivery |
-| `GET /mock/mixpanel/query` | Our explicit effective metric, including signed correction events | Hypothetical Mixpanel query/dashboard contract |
-| `GET /api/report?run=mock-run-20261107` | Deterministic scan/group, no change | Vuk-style report |
-| `GET /api/preview` | Existing finding plan and expected signed effects | Read-only repair preview |
-| `POST /api/approve` | Human selection with group hash and actor | Human approval |
-| `POST /api/apply` | Revalidate approval, append permitted synthetic fixes | Limited repair |
-| `POST /api/map` | Apply event-name mapping as approved local config | Renamed-event resolution |
-| `POST /api/reset-mappings` | Reset local event-name rules | Demo control |
-| `POST /api/advance-clock` | Advance simulated ingest visibility | Deterministic time control |
-| `GET /api/verify` | Read report after simulated ingestion | Post-fix verification |
-| `GET /api/evidence?txn=txn_price` | Raw source, destination, corrections for a transaction | Evidence drawer |
-| `GET /api/audit` | Approval records, immutable action hashes and payloads | Case audit receipt |
-| `GET /api/manifest` | Source mode, fixed time, store, tenancy, currency rules | Provenance |
+| `npm start` | `recovery_demo.py` | Main demo on port 8875. `--mock` forces synthetic data, `--manual` keeps approval-gated recovery, `--port` and `--runtime` choose the port and state directory. Without `--mock` or `--manual` it switches to the live demo if `runtime/live-adapty/live-config.json` exists. |
+| `npm run start:live` | `recovery_live_demo.py` | Live Adapty demo on port 8876. Requires the private live config. |
+| `npm run start:legacy` | `reconcile_mock.py serve --port 8765` | Only the legacy analytics and cancellation pages. Run `npm run seed` first. |
+| `npm run seed` | `reconcile_mock.py seed`, `paid_access.py seed` | Resets the two legacy JSON state files. |
+| `npm run check:access` | `paid_access.py check` | Self-check of the cancellation recovery flow in a temporary directory. |
+| `npm run check:offline` | `hackathon_data.py check` | Verifies fixture checksums and scans the offline dataset. |
+| `npm run benchmark:sdk` | `benchmark_sdk.py` | Measures the Python SDK against a local collector. |
 
-The importer deliberately has a simplified, documented contract. It models the field names and the needed behaviour rather than pretending to implement every rate limit, internal queuing condition, project permission or transport status of real Mixpanel.
+Example: `npm start -- --mock --port 8875`, then open `http://127.0.0.1:8875`.
 
-## Two different notions of correct data
+## Modules
 
-1. **Per-transaction reconciliation:** join by transaction ID **and event class**, compare normalized signed amounts per currency. Renamed events found under a known transaction suppress false missing findings.
-2. **Effective destination metric:** query-time-deduped stored events **plus** an explicitly configured `reconcile_correction` event; raw source events are never rewritten. Adding a correction to Mixpanel does **not** automatically adjust every existing dashboard or its built-in revenue metric. A real implementation would require a dashboard/query definition. The mock's `/mock/mixpanel/query` models that explicit definition; it does not claim to reproduce every Mixpanel query semantics.
+Launchers and services:
 
-Native-looking fields retain provider naming. Synthetic `price_local` is deliberately stored as decimal **strings** on Mixpanel events and as numeric JSON floats on Adapty webhook projections. All calculations use `Decimal`; currency-specific minor-unit rules are out of scope of the six-class main loop and treated separately in `reference/stripe`, `reference/google` and `docs/API_SOURCES.md`.
+| File | What it is |
+| --- | --- |
+| `recovery_demo.py` | Launcher for the main demo. Starts the provider, Lumen and engine as child processes of `recovery_service.py`, creates their shared signing key, waits for each health check and stops them all on exit. |
+| `recovery_live_demo.py` | Launcher for the same three processes using a live Adapty configuration as the read-only source of entitlements. |
+| `recovery_service.py` | The service itself, started once per role (`--role provider`, `lumen` or `engine`). The engine exposes the `/api/recovery/*` API, receives signed SDK events, scans accounts, plans and executes recovery, verifies the result, exports CSV/JSON, and serves the browser UI and the legacy routes. Provider and Lumen expose HMAC-signed `/internal/*` routes; Lumen also exposes the Premium gate (`POST /premium/export`). |
+| `recovery_monitor.py` | Builds the incident feed returned by `GET /api/recovery/monitor`: summary, incident list, causes and per-incident timeline. |
+| `recovery_domain.py` | SQLite schemas and decision rules for the provider, the Adapty-shaped profile store and Lumen: account pages, the Premium gate decision, resync, clock control and demo fault injection. |
+| `recovery_live.py` | Read-only Adapty integration: loads and validates the live config, reads profiles over HTTPS with retry and cooldown handling, and normalises them into entitlements. |
+| `recovery_scenarios.py` | Builds the deterministic synthetic 100-account scenario (24 accounts with missing activation, 60 healthy, the rest expired, policy-denied, unknown identity, stale or unavailable) and the manifest describing the offline fixture. |
+| `recovery_contracts.py` | Request shapes for Adapty's Stripe and Paddle purchase-validation endpoints, built and checked locally with synthetic references. Makes no network requests. |
 
-## Other mock providers, not active adapters
+SDKs and the sample app:
 
-The `reference/` tree contains **20 synthetic examples** for Google Play (order, subscription, RTDN, fractional Money), Apple (decoded unsigned JWS and financial TSV), Stripe (charge/refund/balance), Amplitude (HTTP V2/export), AppsFlyer (S2S/CSV), PostHog (capture/S3), and RevenueCat/Superwall/Apphud/Qonversion webhook formats. These are static **reference fixtures**, *not* wire-tested provider emulators and not part of the six-class detect/apply loop.
+| File | What it is |
+| --- | --- |
+| `recovery_sdk.py` | Server SDK used by Lumen in the main demo. Validates, signs and stores events in a durable SQLite outbox, then delivers them to the engine's collector with bounded retries. |
+| `collector_sdk.py` | Earlier, simpler SDK used by the cancellation demo. Validates and signs an event and delivers it synchronously; also contains the matching collector-side verification. |
+| `lumen_app.py` | In-memory model of the Lumen app for the cancellation demo: subscription projection, cache, the Premium gate, a cancellation handler with a faulty and a fixed version, and resync. |
+| `paid_access.py` | Cancellation recovery demo behind `/api/access/*`: detect affected accounts, preview a plan, approve, apply and verify. Also a CLI (`seed`, `check`, `report`). |
+| `access_fixtures.py` | Synthetic 100-account population for the cancellation demo, with 24 affected accounts and a separate answer key used only by checks. |
 
-For the **937-order revenue bridge** with FX/refund/time waterfall and 71 checks, use the separate `reconcile-revenue-bridge-pack.zip` from the project Library. It is fully offline and remains a secondary demo, not a real Google Play import.
+Legacy mock, data and tooling:
 
-For the organisers' Lumen dataset, use their `data/offline/*.csv.gz` or `data/lumen_dataset.json.gz` **as read-only source fixtures** and persist the chosen sample IDs. Do **not** run `python3 seed_adapty.py` or any `adapty auth`/S2S commands for mock mode, since those really write to Adapty. Their README explicitly says fake store product IDs, timestamp shifting at replay, and a separate `lumen_<run>_...` generated customer-ID scheme. Do not confuse offline `seq` with store order ID.
+| File | What it is |
+| --- | --- |
+| `reconcile_mock.py` | The original analytics reconciliation mock and its HTTP handler. `recovery_service.py` reuses this handler for static files and the `/api/*` and `/mock/*` routes. |
+| `hackathon_data.py` | Verifies the checksums of `fixtures/hackathon`, imports the offline CSV files into a temporary SQLite database and scans every account's subscription lifecycle. |
+| `adapty_seed_setup.py` | One-time setup for the live demo. Runs the organisers' pinned seed script against an existing Adapty app through the Adapty CLI, then writes the private live config. This is the only script here that writes to Adapty; no npm script runs it and the mock demo does not need it. |
+| `benchmark_sdk.py` | Measures `recovery_sdk.py` enqueue latency, payload size and behaviour during a collector outage, on loopback only. |
+| `live_acceptance.py` | Acceptance check against an already running live demo, over public HTTP only. Requires its address: `npm run test:live -- --url http://127.0.0.1:8876`. |
+| `automatic_acceptance.py` | Acceptance check of automatic recovery over public HTTP (`npm run test:auto`). Without `--url` it starts its own isolated local fixture. |
 
-## Validation and handoff
+## Data directories
 
-Run `python3 reconcile_mock.py check`. It checks starting gaps, six classes/seven findings, three approved groups/four writes, local mapping, invisibility before tick, exact remaining ghost after tick, repeat no-op. It can run without internet.
+| Path | Contents |
+| --- | --- |
+| `fixtures/hackathon/` | The organisers' synthetic Lumen dataset: `lumen_dataset.json.gz`, `users.csv.gz`, `transactions.csv.gz`. `manifest.json` pins the source revision and a SHA-256 checksum per file; `hackathon_data.py` and the TypeScript provider simulator refuse files that do not match. |
+| `reference/` | 20 sample payloads shaped like other providers' APIs (Google Play, Apple, Stripe, Amplitude, AppsFlyer, PostHog and four subscription platforms). The analytics page lists and displays them through `/api/samples` and `/api/sample`. Do not add or remove files here: tests assert the count. Sources are indexed in [`docs/API_SOURCES.md`](docs/API_SOURCES.md). |
+| `runtime/` | Generated at run time and ignored by Git: SQLite databases, logs and the signing key for each demo, the legacy JSON state, and the private live config under `runtime/live-adapty/`. Safe to delete when no demo is running, except `runtime/live-adapty/`, which holds the live setup. |
+| `_evaluation/` | Generated and ignored by Git: expected-result files written by `seed` for the self-checks. The servers never read them. |
 
-`docs/API_SOURCES.md` contains official references and where provider examples come from. The browser UI `Reconcile-komplet.zip` is **not wired to this kit yet**; to integrate it, use the mock `/api/*` endpoints instead of any provider or Vuk live endpoint, and label every screen `FULL MOCK / SYNTHETIC DATA`. Future live integration can swap adapters after the hackathon, but no mode switch is implemented here.
+## Tests
+
+| Directory | Scope | Root command |
+| --- | --- | --- |
+| `tests/` | Unit and focused regression tests for each module. | `npm test` (also runs the browser tests in `Reconcile/tests`) |
+| `integration/` | HTTP flows across the three services, started as local processes. | `npm run test:integration` |
+| `acceptance/` | Black-box checks using subprocesses and public HTTP only; includes a long stress run. `acceptance/support/` holds its local source fixture and launcher. | `npm run test:acceptance` |
+
+Tests use temporary databases and loopback services. Results and measurements
+are recorded in [`docs/VERIFICATION.md`](../docs/VERIFICATION.md).
+
+## Legacy analytics mock
+
+`reconcile_mock.py` is a deterministic, stateful mock of a different problem:
+revenue events in the subscription provider that are missing, duplicated or
+wrong in an analytics destination (modelled on Adapty and Mixpanel). It contacts
+no external service; the provider-style routes under `/mock/` are local.
+
+It is reachable in two ways:
+
+- inside the main demo at `/analytics.html`, with its state kept under the
+  demo's runtime directory;
+- on its own with `npm run seed && npm run start:legacy`, at
+  `http://127.0.0.1:8765`.
+
+Command line, from this directory:
+
+```sh
+python3 reconcile_mock.py seed     # write the starting state
+python3 reconcile_mock.py report   # print the current findings
+python3 reconcile_mock.py check    # reseed, run the whole flow, assert the results
+```
+
+`seed` overwrites only `runtime/state.json` and `_evaluation/oracle.json`.
+`check` leaves the final state behind; run `seed` again to restore the start.
+
+### Scenario
+
+The seed uses run ID `mock-run-20261107`, a fixed clock, app `mock-lumen` and
+deterministic event IDs.
+
+| User | Situation | Finding |
+| --- | --- | --- |
+| `u00001` | USD purchase 9.99 missing from analytics | `MISSING_IN_MIXPANEL` |
+| `u00002` | USD refund 6.99 missing; purchase present | `MISSING_IN_MIXPANEL` |
+| `u00003` | USD purchase 12.99 recorded twice with different insert IDs | `DUPLICATE_IN_MIXPANEL` |
+| `u00004` | EUR 9.99 recorded as 999.00 | `PRICE_MISMATCH` |
+| `u00005` | EUR 14.99 recorded under the unknown event name `premium_paid_v2` | `UNMAPPED_EVENT_NAME` |
+| `u00006`, `u00007` | Matching USD and EUR records | none |
+| `u00008` | Sandbox purchase, absent from production analytics | `SANDBOX_EXPECTED`, no repair |
+| `u00009` | USD 11.98 purchase present only in analytics | `EXTRA_IN_MIXPANEL`, manual investigation |
+
+The gap is reported per currency as destination minus source. It starts at
+`{"USD":"21.97","EUR":"989.01"}` with six finding groups and seven findings.
+
+The flow is: approve the three repairable groups, map `premium_paid_v2` to
+`purchase`, apply, advance the mock clock one tick, verify. Apply produces four
+writes (the missing group has two findings). Price and duplicate fixes are
+separate signed `reconcile_correction` events; original events are never
+changed. New writes become visible only after the clock advances, so the report
+is unchanged immediately after apply. Afterwards the gap is
+`{"USD":"11.98","EUR":"0.00"}`: only the extra and sandbox findings remain.
+Applying again writes nothing.
+
+### Routes
+
+| Route | Purpose |
+| --- | --- |
+| `GET /api/report`, `GET /api/preview` | Current findings by group; the repair plan with expected effects. |
+| `POST /api/detect`, `POST /api/verify` | Re-run detection (and read back applied actions) and record the run in history. |
+| `POST /api/approve`, `POST /api/apply` | Approval is a separate, required step. Apply re-runs detection, rejects stale approvals and writes only outstanding approved findings. |
+| `POST /api/map`, `POST /api/reset-mappings` | Set or reset the event-name mapping. |
+| `POST /api/advance-clock` | Advance the mock clock so pending writes become visible. |
+| `GET /api/verify`, `GET /api/evidence?txn=…`, `GET /api/audit` | Read-back status, raw records for one transaction, approvals and action records. |
+| `GET /api/manifest`, `GET /api/history`, `GET /api/operations` | Scenario description, the last 20 recorded runs, per-transaction status. |
+| `GET /api/samples`, `GET /api/sample?path=…` | List and read the files in `reference/`. |
+| `POST /api/reset` | Reseed the scenario. |
+| `GET /mock/adapty/api/v2/server-side-api/profile/?customer_user_id=…` | Synthetic profile. It has no per-transaction prices. |
+| `GET /mock/adapty/events/export` | Synthetic source events, one JSON object per line. This is the price ledger the mock compares against. |
+| `GET /mock/mixpanel/api/2.0/export`, `GET /mock/mixpanel/query` | Visible destination events; effective totals including corrections. |
+| `POST /mock/mixpanel/import?region=eu` | Stores events, visible one tick later. With `region=us` the request succeeds but stores nothing, to model delivery to the wrong region. |
+
+Write requests must be JSON, at most 1 MiB, and come from the same loopback
+origin. The same handler also serves the cancellation demo routes
+(`/api/access/*`, `/api/collector/events`, `/mock/lumen/export`) from
+`paid_access.py`.
+
+The mock models field names and the behaviour needed for this scenario. It does
+not reproduce the real services' rate limits, permissions or query semantics.

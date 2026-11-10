@@ -1,6 +1,6 @@
 # Provider simulator
 
-`@reconcile/provider-simulator` is an independent loopback HTTP process with its own SQLite file. It uses the server package's signed HTTP verification, SQLite worker, Adapty normalizer, and persisted source cooldown reader.
+`@reconcile/provider-simulator` stands in for the subscription provider in the TypeScript runtime: it is the source of entitlements that the engine and the Lumen app read. It is an independent loopback HTTP process with its own SQLite file, and reuses the server package's signed HTTP verification, SQLite worker, Adapty normalizer, and persisted source cooldown reader. See the [root README](../../README.md) for the whole system.
 
 ## Mock mode
 
@@ -17,6 +17,7 @@ Set `PROVIDER_MODE=live` and `PROVIDER_LIVE_CONFIG` to a private-scope config co
 All routes require `recovery-internal-v1` HMAC headers and accept loopback traffic only:
 
 - `GET /internal/manifest`
+- `GET /internal/live/status`
 - `GET /internal/provider/accounts?cursor=&limit=500`
 - `GET /internal/adapty/profiles?cursor=&limit=500`
 - `GET /internal/adapty/profile?user=<customer-id>`
@@ -25,7 +26,7 @@ The pages return `items`, `next_cursor`, and `total`; limits are bounded to 1–
 
 ## Run
 
-Build the shared server package first so its exported NodeNext files exist, then build or test this workspace:
+From the repository root, after `npm ci`. Build the shared server package first so its exported files exist, then build or test this workspace:
 
 ```sh
 npm run build --workspace @reconcile/server
@@ -33,6 +34,6 @@ npm run build --workspace @reconcile/provider-simulator
 npm test --workspace @reconcile/provider-simulator
 ```
 
-Provide `RECOVERY_KEY_FILE` and optionally `PROVIDER_PORT`, `PROVIDER_DB`. Mock-specific settings are `PROVIDER_RUN_ID`, `PROVIDER_SAMPLE_SIZE`, and `PROVIDER_FIXTURE_DIR`. Live mode additionally needs `PROVIDER_LIVE_CONFIG`. The default bind is `127.0.0.1:8767`; the default database is `runtime/provider-simulator.sqlite3`. Reusing a database with a different run or scope fails closed; create a separate database for a new scope.
+`npm run start:ts` at the root starts this process together with Lumen and the engine. To run it alone, use `npm start --workspace @reconcile/provider-simulator` with `RECOVERY_KEY_FILE` set (a file holding the shared signing key, at least 32 bytes) and optionally `PROVIDER_PORT`, `PROVIDER_DB` and `PROVIDER_MODE`. Mock-specific settings are `PROVIDER_RUN_ID`, `PROVIDER_SAMPLE_SIZE` (1–1000), `PROVIDER_FIXTURE_DIR` and `PROVIDER_ACTIVE_OVERLAY`. Live mode additionally needs `PROVIDER_LIVE_CONFIG`. The default bind is `127.0.0.1:8767`; the default database is `runtime/provider-simulator.sqlite3`. Reusing a database with a different run or scope fails closed; create a separate database for a new scope.
 
-This slice does not port catalog/action/validation writes, provider evidence/history, demo reset/fault routes, or the legacy Stripe/Paddle provider endpoints.
+The HTTP service is read-only and has only the routes above. It does not expose the Python runtime's provider write, evidence, history, reset or fault routes. `src/activation.ts` contains an `ActivationProvider` class that implements that behaviour (catalog repair, purchase validation, evidence, history and fault controls) over its own SQLite database; it is covered by `tests/activation.test.mjs` but is not exported from the package entry point or reachable over HTTP.

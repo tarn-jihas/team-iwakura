@@ -1,8 +1,10 @@
 # TypeScript server SDK
 
-`@reconcile/server-sdk` is the supported SDK for the TypeScript runtime. It is a
-breaking change for integrations using the former Python SDK; their existing
-outbox databases are not imported or reset. Use a new, private outbox file and
+`@reconcile/server-sdk` is the SDK an application backend uses to report signed
+access events (for example a Premium gate decision) to the Reconcile collector.
+It is the supported SDK for the TypeScript runtime and a breaking change for
+integrations using the Python SDK (`reconcile-mock-first-kit/recovery_sdk.py`);
+their existing outbox databases are not imported or reset. Use a new, private outbox file and
 configure the same app, environment, run ID and signing key as the collector.
 
 Create a `CollectorSDK` with `key`, `runId`, `app`, `environment`, `outboxPath`
@@ -24,4 +26,12 @@ updates and forwarded after restart.
 The outbox has bounded capacity and retries. Enqueue performs synchronous
 `node:sqlite` operations; Node 22 marks this API experimental. Measure latency
 and consider a worker-thread integration for a latency-sensitive application.
-The benchmark in `apps/server/benchmarks/` measures the local collector only.
+The [SDK benchmark](../../apps/server/benchmarks/README.md) measures the local
+collector only.
+
+From the repository root, after `npm ci`:
+
+```sh
+npm run build --workspace @reconcile/server-sdk
+npm test --workspace @reconcile/server-sdk
+```

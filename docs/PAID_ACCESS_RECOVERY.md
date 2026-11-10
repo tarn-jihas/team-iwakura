@@ -1,26 +1,34 @@
 # Paid Access Recovery · local Lumen demo
 
+_This is the earlier cancellation / paid-access demo, retained alongside the main [automatic recovery flow](AUTOMATIC_RECOVERY.md)._
+
 This is a working client-app simulator and recovery flow, using synthetic current
 entitlements. It runs inside the existing Python standard-library server. It does
 not charge/refund customers or write licences to an external provider.
 
 ## Present the scenario
 
-Start the project with `npm start` and open **Cases → Open access incident**.
-On a fresh clone, run `npm run seed` first; stop the server before a CLI seed.
-Restart an already-running server after pulling code to load the new routes.
+Start the project with `npm start -- --mock` and open
+<http://127.0.0.1:8875/access.html>. No seeding is needed in this mode: the
+engine creates the synthetic access state on first start, inside its runtime
+directory.
 
-1. Open **Lumen app**. Keep the first account selected and click **Export premium
-   preview**. The actual HTTP gate returns403 while the source entitlement remains
+The same demo is also reachable from the first analytics mock. There the state
+must be seeded once: run `npm run seed` (with the server stopped), then
+`npm run start:legacy`, open <http://127.0.0.1:8765> and choose
+**Cases → Open cancellation recovery**.
+
+1. Choose **Open Lumen app**. Keep the first account selected and click **Try
+   Premium export**. The actual HTTP gate returns 403 while the source entitlement remains
    active. This records a customer-attempt event through the collector SDK.
 2. Return to the incident. Leave the default UTC window and faulty-v1 filter, then
-   click **Detect blast radius**.
+   click **Find affected accounts**.
 3. Confirm **100 in scope / 94 evaluated / 24 affected / 6 inconclusive**. Inspect
    account evidence: current source, identity mapping, processed cancellation,
    before/after projection, cache and gate decisions.
-4. Select all24 eligible accounts, **Preview selected repair**, and inspect the
+4. Select all 24 eligible accounts, **Preview selected repair**, and inspect the
    exact diff and unchanged source expiry. Check the approval box and approve.
-5. **Apply approved repair** accepts24 local resync actions. No account is declared
+5. **Apply approved repair** accepts 24 local resync actions. No account is declared
    restored until the real gate has been checked.
 6. **Verify actual gates** returns **23 verified / 1 unresolved**. The injected
    one-shot cache refresh failure leaves the actual app gate denying that account.
@@ -30,11 +38,11 @@ Restart an already-running server after pulling code to load the new routes.
    final result is **24 verified / 0 unresolved**. Six unknown accounts remain
    excluded, and the faulty consumer's root cause remains pending.
 9. Return to Lumen and export with the previously denied account. The same premium
-   endpoint now returns200. Export the audit bundle to reconstruct the result.
+   endpoint now returns 200. Use **Export evidence bundle** to reconstruct the result.
 
 The Demo Lab can switch future events between faulty-v1 and fixed-v2 behavior and
 send a new cancellation. Fixing this demo handler is separate from restoring
-current access. The alternate100-account seed changes registry IDs and the affected
+current access. The alternate 100-account seed changes registry IDs and the affected
 selection; the detector uses the same rules.
 
 ## Population and evidence
@@ -48,8 +56,8 @@ selection; the detector uses the same rules.
 | Ambiguous identity mapping | 3 | Inconclusive; no write |
 | Missing or stale source | 3 | Inconclusive; no write |
 
-These are synthetic reconstructions of the supplied document's scenario. The24
-default IDs follow its listed cohort, but no downloaded/live Adapty ledger is
+These are synthetic reconstructions of the scenario in the team's original
+research document. The 24 default IDs follow its listed cohort, but no downloaded/live Adapty ledger is
 claimed. Our source observation schema describes a supported current annual
 entitlement. Unsupported lifecycle/policy combinations abstain.
 
@@ -86,7 +94,7 @@ nested arbitrary payloads and card/credential fields are rejected. This is an
 allowlisted metadata contract, not a general-purpose sensitive-text redactor.
 
 The local generated signing key stays in ignored runtime state and is excluded
-from HTTP reports and exported evidence. Signatures expire after300 real seconds;
+from HTTP reports and exported evidence. Signatures expire after 300 real seconds;
 same-event/same-payload retries are idempotent, conflicting payloads are rejected.
 This authenticates our local app journal, not a store payment or provider signature.
 
@@ -98,7 +106,7 @@ incident. Human approval does not change client access. Apply performs a fresh
 preflight of the whole selected plan before any resync write; changed or expired
 preconditions require a new assessment and approval.
 
-Source freshness is900 scenario seconds; plan validity is300 scenario seconds.
+Source freshness is 900 scenario seconds; plan validity is 300 scenario seconds.
 The fixed anchor is `2026-11-03T00:12:04Z`. These are explicit replay-clock limits,
 separate from actual SDK authentication and wall-clock collection timestamps.
 `POST /api/access/demo` with `{"action":"advance","seconds":301}` demonstrates
@@ -124,7 +132,7 @@ retain an old restored status. A fresh retry gets a new plan and action ID.
 | `GET /api/access/registry` | Known client accounts and mappings |
 | `GET /api/access/journal` | Signed collector metadata journal |
 | `POST /api/collector/events` | SDK ingestion with `X-Reconcile-Signature` |
-| `POST /mock/lumen/export` | Actual premium gate:200 allowed /403 denied |
+| `POST /mock/lumen/export` | Actual premium gate: 200 allowed / 403 denied |
 | `POST /api/access/demo` | Explicit reset, alternate seed, handler, cancel and clock controls |
 
 The interface is at `/access.html`; `/access.html#lumen` opens the client simulator.

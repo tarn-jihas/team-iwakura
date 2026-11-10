@@ -5,14 +5,20 @@ engine listens on loopback, rejects cross-origin mutations and serves only
 allowlisted frontend assets. Internal adapter calls and collector delivery use
 HMAC. Runtime databases and signing material are not exposed through static URLs.
 
+The engine is started by `npm start` (port 8875; `--mock` selects synthetic
+evidence) or `npm run start:live` (port 8876). The automatic monitor is served
+at `/`, the manual console at `/recovery-console.html`.
+
 ## Automatic monitor API
 
-The live launcher uses policy `local-fulfillment-resync-v2`. Independently read
+In automatic mode, the default for both launchers, the engine uses policy
+`local-fulfillment-resync-v2`. Independently read
 source expectations and local application audits trigger diagnosis and an exact
 policy-authorized resync/probe plan without requiring a customer denial. The
 policy never authorizes provider writes or grants; evidence checks and durable
 action receipts remain mandatory. The manual API below stays available for
-regression scenarios and advanced investigation.
+regression scenarios and advanced investigation; `--manual` starts the engine
+with approval-gated recovery instead.
 
 | Method / path under `/api/recovery` | Input or meaning |
 | --- | --- |
@@ -99,7 +105,7 @@ An unknown gate is represented by `null`, never inferred as a deny or allow.
 | Provider/Adapty simulator | Independent account/payment evidence, paginated historical observations, catalog/profile reads and simulated validation; owns provider and Adapty stores |
 | Engine | Snapshot/classification/cohort, immutable plan, approval, preflight, durable intent, readback and verified report; owns engine store |
 | Lumen | Account registry, projection/cache, idempotent revision-bound resync and the shared premium/probe authorization decision; owns Lumen store/outbox |
-| Automatic policy / operator | Authorizes the exact supported local plan automatically in live mode; operator review remains required for manual regression flows |
+| Automatic policy / operator | Authorizes the exact supported local plan in automatic mode; operator review remains required for manual regression flows |
 | Mobile simulator | Untrusted observation references forwarded to its backend; cannot confirm payment or repair licences |
 
 The Lumen adapter implements `listAccounts(cursor)` as
